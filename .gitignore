@@ -1,0 +1,12 @@
+slack-server.pid
+slack-server.log
+storage/channels.yaml
+storage/users.yaml
+node_modules/
+storage/.session-cache.json
+PROMPT.md
+/tmp/
+.venv/
+__pycache__/
+.browser_data/
+.env
