@@ -91,6 +91,9 @@ async def fetch_token_from_page():
 
 
 
+# Cache for enterprise status
+_enterprise_cache = {"is_enterprise": None}
+
 @app.get("/status")
 async def get_status():
     if not session:
@@ -127,6 +130,91 @@ async def get_status():
         }
     except Exception as e:
         return {"ready": False, "error": str(e), "authenticated": False}
+
+@app.get("/enterprise-check")
+async def check_enterprise():
+    """Check if the workspace is an enterprise Slack instance."""
+    global intercepted_token, session
+    
+    # Return cached result if available
+    if _enterprise_cache["is_enterprise"] is not None:
+        return {"is_enterprise": _enterprise_cache["is_enterprise"]}
+    
+    if not intercepted_token:
+        await fetch_token_from_page()
+        
+    if not intercepted_token:
+        raise HTTPException(status_code=401, detail="Token not captured yet")
+    
+    if not session:
+        raise HTTPException(status_code=503, detail="Browser not initialized")
+
+    try:
+        page = await session.get_current_page()
+        
+        # Call team.info to check for enterprise
+        script = """(token) => {
+            return new Promise((resolve, reject) => {
+                const timestamp = Date.now();
+                const xId = 'noversion-' + timestamp + '.' + Math.floor(Math.random() * 1000);
+                const versionTs = '1755340361';
+                
+                const queryParams = new URLSearchParams({
+                    '_x_id': xId,
+                    '_x_version_ts': versionTs,
+                    '_x_frontend_build_type': 'current',
+                    '_x_desktop_ia': '4',
+                    '_x_gantry': 'true',
+                    'fp': 'ec',
+                    '_x_num_retries': '0'
+                });
+                
+                const formData = new URLSearchParams();
+                formData.append('token', token);
+                formData.append('web_client_version', versionTs);
+                formData.append('_x_sonic', 'true');
+                formData.append('_x_app_name', 'client');
+                
+                fetch('https://slack.com/api/team.info?' + queryParams.toString(), {
+                    method: 'POST',
+                    body: formData,
+                    credentials: 'include',
+                    headers: {
+                        'Accept': '*/*',
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Origin': 'https://app.slack.com',
+                    }
+                })
+                .then(r => r.json())
+                .then(data => resolve(data))
+                .catch(err => reject(err.message));
+            });
+        }"""
+        result = await page.evaluate(script, intercepted_token)
+        
+        # Handle case where result might be a string (JSON string from API)
+        if isinstance(result, str):
+            import json as json_module
+            try:
+                result = json_module.loads(result)
+            except:
+                result = {}
+        
+        # Check if workspace is enterprise by looking for enterprise_id or enterprise domain
+        team_info = result.get("team", {}) if isinstance(result, dict) else {}
+        url = team_info.get("url", "")
+        is_enterprise = (
+            team_info.get("enterprise_id") is not None or 
+            "enterprise.slack.com" in url
+        )
+        
+        # Cache the result
+        _enterprise_cache["is_enterprise"] = is_enterprise
+        
+        return {"is_enterprise": is_enterprise, "team": team_info}
+    except Exception as e:
+        logger.error(f"Enterprise check failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api")
 async def call_api(request: Request):

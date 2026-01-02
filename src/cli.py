@@ -336,8 +336,28 @@ def call_api(client, endpoint: str, params: dict = None):
     return data
 
 
+def is_enterprise(client) -> bool:
+    """Check if the workspace is an enterprise Slack instance."""
+    try:
+        response = client.get(f"{SERVER_URL}/enterprise-check")
+        if response.status_code == 200:
+            return response.json().get("is_enterprise", False)
+    except Exception:
+        pass
+    return False
+
+
 def fetch_unread_counts(client) -> dict:
-    """Fetch all unread counts using users.counts (single API call)."""
+    """Fetch all unread counts using users.counts (single API call).
+    
+    Note: users.counts is not available on enterprise Slack workspaces.
+    Returns empty data for enterprise workspaces.
+    """
+    # Check if this is an enterprise workspace
+    if is_enterprise(client):
+        print("⚠️  users.counts unavailable on enterprise Slack", file=sys.stderr)
+        return {"channels": [], "groups": [], "ims": []}
+    
     data = call_api(client, "users.counts", {})
     if not data.get("ok"):
         print(f"❌ users.counts failed: {data.get('error')}", file=sys.stderr)
