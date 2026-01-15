@@ -1,5 +1,5 @@
 [project]
-name = "slack"
+name = "slack-chat"
 version = "2.0.0"
 description = "Slack CLI via browser-use"
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-slack = "src.cli:app"
+slack-chat = "src.cli:app"
 
 [build-system]
 requires = ["hatchling"]

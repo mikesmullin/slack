@@ -4955,7 +4955,7 @@ wheels = [
 ]
 
 [[package]]
-name = "slack"
+name = "slack-chat"
 version = "2.0.0"
 source = { editable = "." }
 dependencies = [

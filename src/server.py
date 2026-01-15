@@ -298,6 +298,28 @@ async def call_api(request: Request):
         logger.error(f"API call failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/execute")
+async def execute_js(request: Request):
+    """Execute arbitrary JavaScript in the browser context."""
+    global session
+    
+    body = await request.json()
+    script = body.get("script")
+    
+    if not script:
+        raise HTTPException(status_code=400, detail="Missing 'script' in request body")
+    
+    if not session:
+        raise HTTPException(status_code=503, detail="Browser not initialized")
+
+    try:
+        page = await session.get_current_page()
+        result = await page.evaluate(script)
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"JS execution failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/navigate")
 async def navigate(request: dict):
     url = request.get("url")

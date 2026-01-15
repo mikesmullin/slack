@@ -1,7 +1,6 @@
 slack-server.pid
 slack-server.log
-storage/channels.yaml
-storage/users.yaml
+/storage/
 node_modules/
 storage/.session-cache.json
 PROMPT.md

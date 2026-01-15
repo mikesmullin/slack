@@ -24,11 +24,13 @@ pyproject.toml            # Project configuration
 
 ### Installation
 
-Install the tool globally using `uv`:
+Install the tool globally in **editable mode** using `uv`:
 
 ```bash
-uv tool install .
+uv tool install --editable .
 ```
+
+Editable mode means the `slack` command will always use the current source code from your workspace, so changes are reflected immediately without reinstalling.
 
 Now you can use the `slack` command anywhere!
 
@@ -100,21 +102,37 @@ slack inbox read CHANNEL_ID  # Mark entire channel as read
 slack inbox context CHANNEL_ID:TIMESTAMP [--limit N]
 ```
 
-**Event ID Format**: `CHANNEL_ID:TIMESTAMP` (e.g., `C6M7U8DFF:1766558024.931179`) or just `CHANNEL_ID`
+**Event ID Format**: `CHANNEL_ID:TIMESTAMP` (e.g., `C06SERVER01:1766558024.931179`) or just `CHANNEL_ID`
 
 ## 🔧 Development
 
-Run directly without installing:
+### Running from Source
+
+Run directly without installing using `uv`:
 
 ```bash
 # Server commands
-uv run src/cli.py server start
-uv run src/cli.py server status
-uv run src/cli.py server stop
+uv run slack server start
+uv run slack server status
+uv run slack server stop
 
 # Client commands
-uv run src/cli.py client read-channel-messages C6M7U8DFF --limit 5
+uv run slack client read-channel-messages C06SERVER01 --limit 5
+
+# Inbox commands
+uv run slack inbox summary
+uv run slack inbox list
 ```
+
+### Editable Installation (Recommended for Development)
+
+If you want to use the `slack` command globally while developing:
+
+```bash
+uv tool install --editable .
+```
+
+This creates symlinks, so any code changes are immediately reflected when running the `slack` command.
 
 ## 🎯 How It Works
 
