@@ -9,3 +9,4 @@ PROMPT.md
 __pycache__/
 .browser_data/
 .env
+buffer.json

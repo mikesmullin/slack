@@ -1,0 +1,65 @@
+# Slack Watch Configuration
+# Copy this file to config.yaml and customize
+#
+# Environment variables available in shell commands:
+#   $_BUFFER    - Path to buffer.json containing full message object
+#   $_CHANNEL   - Channel ID (e.g., C0A8JJBAVU2)
+#   $_USER      - User ID who sent the message
+#   $_TS        - Message timestamp
+#   $_TEXT      - Plain text content
+#   $_THREAD_TS - Thread timestamp (if reply in thread)
+#
+# Options:
+#   pattern: regex pattern to match (case-insensitive by default)
+#   shell: shell command to execute
+#   reply: if true, post stdout+stderr as a reply to the triggering message
+#   case_insensitive: true (default) or false
+
+watch:
+  # Watch a channel by name (will be resolved to ID)
+  #general:
+  #  - pattern: "^subd "
+  #    shell: "echo 'woot'"
+
+  # Example: Auto-reply with command output
+  # The shell output is posted as a threaded reply
+  nexint:
+    - pattern: "^!ping"
+      reply: true
+      shell: "echo 'pong!'"
+
+    - pattern: "^!time"
+      reply: true
+      shell: "date '+%Y-%m-%d %H:%M:%S'"
+
+    - pattern: "^!joke"
+      reply: true
+      shell: "subd -t talker tell me a joke"
+  
+    - pattern: "^!subd "
+      reply: true
+      shell: "cat $_BUFFER | subd -i -t talker answer"
+  
+    - pattern: "^!jira "
+      reply: true
+      shell: "cat $_BUFFER | subd -i -t jira answer the user_message"
+
+    - pattern: "^!help"
+      reply: true
+      shell: |
+        echo "Available commands:"
+        echo "  !ping - Check if bot is alive"
+        echo "  !time - Get current time"
+        echo "  !help - Show this help"
+
+  # Watch by channel ID directly
+  # C0A8JJBAVU2:
+  #   - pattern: ".*"
+  #     shell: "cat $_BUFFER >> /tmp/channel-log.json"
+
+  # Example: Auto-reply to DMs (not yet implemented)
+  # dm-username:
+  #   - pattern: ".*"
+  #     reply: true
+  #     shell: |
+  #       echo "Thanks for your message! I'm currently away."

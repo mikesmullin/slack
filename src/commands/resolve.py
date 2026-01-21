@@ -12,6 +12,7 @@ from ..utils import (
     get_user_name_by_id,
     truncate_text,
     call_api,
+    SERVER_URL,
 )
 
 channel_app = typer.Typer(help="Channel operations")
@@ -55,29 +56,21 @@ def channel_resolve(
         else:
             # It's a name, get the ID via API
             try:
-                response = client.post(
-                    f"{SERVER_URL}/api",
-                    json={
-                        "endpoint": "conversations.list",
-                        "params": {"exclude_archived": True},
-                    },
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("ok"):
-                        for channel in data.get("channels", []):
-                            if (
-                                channel.get("name") == identifier
-                                or channel.get("name_normalized") == identifier.lower()
-                            ):
-                                output = {
-                                    "input": identifier,
-                                    "type": "channel_name",
-                                    "resolved_name": channel.get("name"),
-                                    "resolved_id": channel.get("id"),
-                                }
-                                print(yaml.dump(output, indent=2, sort_keys=False))
-                                return
+                data = call_api(client, "conversations.list", {"exclude_archived": True, "limit": 1000})
+                if data.get("ok"):
+                    for channel in data.get("channels", []):
+                        if (
+                            channel.get("name") == identifier
+                            or channel.get("name_normalized") == identifier.lower()
+                        ):
+                            output = {
+                                "input": identifier,
+                                "type": "channel_name",
+                                "resolved_name": channel.get("name"),
+                                "resolved_id": channel.get("id"),
+                            }
+                            print(yaml.dump(output, indent=2, sort_keys=False))
+                            return
 
                 # Not found
                 output = {

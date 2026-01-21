@@ -161,3 +161,31 @@ def server_navigate(url: str = typer.Argument(..., help="URL to navigate to")):
             handle_response(response)
     except httpx.ConnectError:
         print("Server is not running.")
+
+
+@app.command("reload")
+def server_reload():
+    """Reload config.yaml configuration without restarting the server."""
+    import httpx
+    
+    try:
+        with get_client() as client:
+            response = client.post(f"{SERVER_URL}/watch/reload")
+            if response.status_code == 200:
+                data = response.json()
+                rules_loaded = data.get('rules_loaded', 0)
+                if rules_loaded > 0:
+                    print(f"✅ Configuration reloaded")
+                    print(f"   Rules loaded: {rules_loaded}")
+                    if data.get('running'):
+                        print(f"   Watch engine: running")
+                else:
+                    print(f"⚠️  Configuration reloaded but no rules loaded")
+                    print(f"   Check config.yaml channel names can be resolved")
+                    print(f"   (Server logs may have more details)")
+            else:
+                print(f"❌ Failed to reload: {response.text}", file=sys.stderr)
+                sys.exit(1)
+    except httpx.ConnectError:
+        print("❌ Server is not running.", file=sys.stderr)
+        sys.exit(1)
