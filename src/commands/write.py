@@ -98,7 +98,7 @@ def reply_command(
 
     Smart targeting - accepts:
     - Channel ID: C0A7RJWRZPT (posts to channel)
-    - Channel name: #prod-tech-internal-ProductA (posts to channel)
+    - Channel name: #sre-team (posts to channel)
     - Storage ID: b89c7a (replies to that message's thread)
     - Event ID: C0A7RJWRZPT:1767815267.099869 (replies to thread)
     - Event ID with thread: C0A7RJWRZPT:1767815267.099869@1767773973.649239
@@ -107,7 +107,7 @@ def reply_command(
 
         slack-chat reply C0A7RJWRZPT "Hello everyone!"
 
-        slack-chat reply "#prod-tech-internal-ProductA" "Hello world!"
+        slack-chat reply "#sre-team" "Hello world!"
 
         slack-chat reply b89c7a "Thanks for the update!"
 
