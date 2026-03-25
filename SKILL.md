@@ -90,6 +90,22 @@ Error on ambiguity:
 ❌ Ambiguous ID 'b8' matches: b89c7a14..., b8a3f2c1...
 ```
 
+### Permalink Conversion
+
+Event-ID commands also accept Slack permalinks directly (for example `message around`, `inbox view --online`, and `inbox context`).
+
+Use this helper to convert a URL into reusable components:
+
+```bash
+slack-chat message parse-url "https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123"
+```
+
+Output includes:
+- `channel_id`
+- `timestamp`
+- `thread_ts` (if present)
+- `event_id` (`CHANNEL:TS` or `CHANNEL:TS@THREAD_TS`)
+
 ### ID Resolution Cache
 User and channel IDs are cached to `storage/_cache/` to reduce API calls:
 
@@ -128,6 +144,7 @@ When you run `slack-chat user resolve` or `slack-chat channel resolve`, the resu
 | List Users | `slack-chat user list` |
 | Find Users | `slack-chat user find <keyword>` |
 | **Context (Online)** | |
+| Parse Slack URL | `slack-chat message parse-url <permalink>` |
 | Message Around | `slack-chat message around <event_id> [-B N] [-A N]` |
 | View Thread | `slack-chat client read-message-thread-replies <channel> <thread_ts>` |
 | **Write (Online)** | |

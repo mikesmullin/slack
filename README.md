@@ -76,6 +76,21 @@ slack client get-channel-info CHANNEL_ID
 slack client search-messages "search query" [--limit N]
 ```
 
+#### Message URL Helpers
+
+For commands that take an event ID, you can now use either format:
+
+- `CHANNEL_ID:TIMESTAMP` (or `CHANNEL_ID:TIMESTAMP@THREAD_TS`)
+- A full Slack permalink URL
+
+```bash
+# Convert permalink to reusable parts
+slack-chat message parse-url "https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123"
+
+# Use permalink directly with message around
+slack-chat message around "https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123" -B 2 -A 2
+```
+
 #### Inbox Commands (Mailbox-Style Unread Management)
 
 The inbox provides a unified view of all unread activity across Slack using optimized internal APIs (3 calls instead of 50+).

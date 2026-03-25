@@ -10,11 +10,44 @@ from ..utils import (
     get_client,
     get_channel_name_by_id,
     get_user_name_by_id,
+    get_user_info,
+    format_event_id,
     parse_event_id,
+    parse_slack_permalink,
     call_api,
+    extract_image_urls,
 )
 
 app = typer.Typer(help="Message operations")
+
+
+@app.command("parse-url")
+def message_parse_url(
+    permalink: str = typer.Argument(..., help="Slack message permalink URL"),
+):
+    """Convert a Slack permalink to event ID components.
+
+    Examples:
+      slack-chat message parse-url "https://workspace.slack.com/archives/C123/p1771347628831459"
+      slack-chat message parse-url "https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123"
+    """
+    parsed = parse_slack_permalink(permalink)
+    if not parsed:
+        print("❌ Invalid Slack permalink", file=sys.stderr)
+        sys.exit(1)
+
+    channel_id = parsed["channel_id"]
+    timestamp = parsed["timestamp"]
+    thread_ts = parsed.get("thread_ts")
+
+    output = {
+        "permalink": permalink,
+        "channel_id": channel_id,
+        "timestamp": timestamp,
+        "thread_ts": thread_ts,
+        "event_id": format_event_id(channel_id, timestamp, thread_ts),
+    }
+    print(yaml.dump(output, indent=2, sort_keys=False, default_flow_style=False))
 
 @app.command("around")
 def message_around(

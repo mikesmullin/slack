@@ -2,6 +2,7 @@
 
 import sys
 import httpx
+import json
 from .const import SERVER_URL
 
 def get_client():
@@ -17,7 +18,13 @@ def call_api(client, endpoint: str, params: dict = None):
     if response.status_code != 200:
         print(f"❌ API error: {response.text}", file=sys.stderr)
         return {}
-    return response.json()
+    data = response.json()
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return {}
+    return data
 
 def is_enterprise(client) -> bool:
     """Check if this is an enterprise workspace."""

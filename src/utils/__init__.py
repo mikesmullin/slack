@@ -34,6 +34,7 @@ from .resolution import (
 from .formatting import (
     format_event_id,
     parse_event_id,
+    parse_slack_permalink,
     format_channel_display,
     truncate_text,
     generate_slack_url,

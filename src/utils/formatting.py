@@ -1,6 +1,8 @@
 """Formatting and Parsing."""
 
 import os
+import re
+from urllib.parse import urlparse, parse_qs
 from .const import SERVER_URL
 
 def format_event_id(
@@ -18,6 +20,13 @@ def format_event_id(
 def parse_event_id(event_id: str) -> tuple:
     """Parse event ID into (channel_id, timestamp, thread_ts)."""
     thread_ts = None
+    parsed_permalink = parse_slack_permalink(event_id)
+    if parsed_permalink:
+        return (
+            parsed_permalink["channel_id"],
+            parsed_permalink["timestamp"],
+            parsed_permalink.get("thread_ts"),
+        )
     
     if ":" in event_id:
         parts = event_id.split(":", 1)
@@ -32,6 +41,52 @@ def parse_event_id(event_id: str) -> tuple:
         return channel_id, timestamp_part, thread_ts
     
     return event_id, None, None
+
+
+def parse_slack_permalink(permalink: str) -> dict | None:
+    """Parse a Slack message permalink into channel/timestamp/thread parts.
+
+    Supports URLs like:
+    - https://workspace.slack.com/archives/C123/p1771347628831459
+    - https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123
+    """
+    if not permalink or "slack.com/archives/" not in permalink:
+        return None
+
+    try:
+        parsed = urlparse(permalink.strip())
+        path_match = re.search(r"/archives/([A-Z0-9]+)/p(\d+)", parsed.path)
+        if not path_match:
+            return None
+
+        channel_id = path_match.group(1)
+        raw_ts = path_match.group(2)
+        timestamp = _compact_slack_ts_to_float_ts(raw_ts)
+        if not timestamp:
+            return None
+
+        params = parse_qs(parsed.query)
+        thread_ts_values = params.get("thread_ts", [])
+        thread_ts = thread_ts_values[0] if thread_ts_values else None
+
+        return {
+            "channel_id": channel_id,
+            "timestamp": timestamp,
+            "thread_ts": thread_ts,
+            "event_id": format_event_id(channel_id, timestamp, thread_ts),
+            "url": permalink,
+        }
+    except Exception:
+        return None
+
+
+def _compact_slack_ts_to_float_ts(raw_ts: str) -> str | None:
+    """Convert compact Slack permalink ts (e.g. 1771347628831459) to 1771347628.831459."""
+    if not raw_ts or not raw_ts.isdigit() or len(raw_ts) < 7:
+        return None
+    seconds = raw_ts[:-6]
+    micros = raw_ts[-6:]
+    return f"{seconds}.{micros}"
 
 
 def format_channel_display(channel_data: dict) -> str:
