@@ -278,7 +278,10 @@ def _print_read_text(
         inline_user_cache = {}
         for msg in messages:
             msg_ts = msg.get("ts") or msg.get("timestamp", "")
-            event_id = format_event_id(channel_id, msg_ts, thread_ts)
+            msg_thread_ts = msg.get("thread_ts") or thread_ts
+            if not msg_thread_ts and int(msg.get("reply_count", 0) or 0) > 0:
+                msg_thread_ts = msg_ts
+            event_id = format_event_id(channel_id, msg_ts, msg_thread_ts)
             channel_display = f"#{channel_name} ({event_id})"
             who = _display_user(client, msg)
             text = _format_message_text(client, msg.get("text", ""), inline_user_cache)
@@ -294,6 +297,31 @@ def _build_target_context(target: str) -> dict:
     """Build a resolve-style target context summary for read/post commands."""
     channel_id, timestamp, thread_ts = parse_event_id(target)
     parsed_url = parse_slack_permalink(target)
+
+    if parsed_url and not thread_ts:
+        channel_id = parsed_url["channel_id"]
+        timestamp = parsed_url["timestamp"]
+        thread_ts = parsed_url.get("thread_ts")
+
+    if timestamp and not thread_ts and channel_id:
+        data = _post_api(
+            "conversations.history",
+            {
+                "channel": channel_id,
+                "oldest": timestamp,
+                "latest": timestamp,
+                "inclusive": True,
+                "limit": 1,
+            },
+        )
+        if data.get("ok"):
+            messages = data.get("messages", [])
+            if messages:
+                msg = messages[0]
+                if msg.get("ts") == timestamp:
+                    thread_ts = msg.get("thread_ts")
+                    if not thread_ts and int(msg.get("reply_count", 0) or 0) > 0:
+                        thread_ts = timestamp
 
     ch = resolve_channel(channel_id)
     resolved_channel_id = ch.get("id", channel_id)
@@ -445,7 +473,10 @@ def _print_around_text(
         inline_user_cache = {}
         for msg in messages:
             msg_ts = msg.get("ts", "")
-            event_id = format_event_id(channel_id, msg_ts, thread_ts)
+            msg_thread_ts = msg.get("thread_ts") or thread_ts
+            if not msg_thread_ts and int(msg.get("reply_count", 0) or 0) > 0:
+                msg_thread_ts = msg_ts
+            event_id = format_event_id(channel_id, msg_ts, msg_thread_ts)
             prefix = "[target] " if msg_ts == target_ts else ""
             channel_display = f"{prefix}#{channel_name} ({event_id})"
             who = _display_user(client, msg)

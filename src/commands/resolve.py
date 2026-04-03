@@ -162,6 +162,45 @@ def _id_prefix_type(identifier: str) -> str:
     return mapping.get(prefix, "unknown")
 
 
+def _infer_thread_ts_for_message(client, channel_id: str, timestamp: str) -> str | None:
+    """Infer thread context for a specific message timestamp.
+
+    Slack permalinks do not always include `thread_ts` query params. In that case,
+    fetch the message envelope and infer thread context from message metadata.
+    """
+    data = call_api(
+        client,
+        "conversations.history",
+        {
+            "channel": channel_id,
+            "oldest": timestamp,
+            "latest": timestamp,
+            "inclusive": True,
+            "limit": 1,
+        },
+    )
+    if not data.get("ok"):
+        return None
+
+    messages = data.get("messages", [])
+    if not messages:
+        return None
+
+    msg = messages[0]
+    if msg.get("ts") != timestamp:
+        return None
+
+    message_thread_ts = msg.get("thread_ts")
+    if message_thread_ts:
+        return message_thread_ts
+
+    # Parent thread messages can omit thread_ts but still expose reply_count.
+    if int(msg.get("reply_count", 0) or 0) > 0:
+        return timestamp
+
+    return None
+
+
 def resolve_target(
     target: str = typer.Argument(
         ...,
@@ -180,6 +219,10 @@ def resolve_target(
         channel_id = parsed_url["channel_id"]
         timestamp = parsed_url["timestamp"]
         thread_ts = parsed_url.get("thread_ts")
+
+        if not thread_ts:
+            with get_client() as client:
+                thread_ts = _infer_thread_ts_for_message(client, channel_id, timestamp)
 
         output.update(
             {
