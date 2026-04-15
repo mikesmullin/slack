@@ -55,6 +55,7 @@ REMOTE commands (direct remote/API operations):
     channel list         List cached channels
     channel find         Find cached channels
     channel describe     Describe a channel
+    channel tab          Fetch a specific channel tab
     channel pending      Check unread/pending state in sidebar
     user list            List cached users
     user find            Find cached users
@@ -368,6 +369,7 @@ Usage:
 
 Subcommands:
     describe   Get channel metadata
+    tab        Fetch one tab body/content
     resolve    Resolve channel ID/name
     list       List cached channels
     find       Find cached channels
@@ -385,6 +387,23 @@ Description:
 Examples:
     slack-chat channel describe #sre-team
     slack-chat channel describe C05R34P9KAA
+""".strip(),
+        ("channel", "tab"): """
+channel tab
+
+Usage:
+    slack-chat channel tab <channel> <tab> [--download] [--navigation-fallback] [--yaml]
+
+Description:
+    Resolve and fetch one channel tab through the authenticated browser server.
+    Uses XHR/fetch first with navigation fallback enabled by default.
+    <tab> can be a 1-based index or a tab name/id.
+
+Examples:
+    slack-chat channel tab #example-team 1
+    slack-chat channel tab #example-team "Project Notes"
+    slack-chat channel tab C05R34P9KAA "Project Notes" --download
+    slack-chat channel tab #example-team "Project Notes" --navigation-fallback
 """.strip(),
         ("channel", "resolve"): """
 channel resolve
@@ -560,6 +579,7 @@ HELP_TREE = {
         },
         "channel": {
                 "describe": {},
+            "tab": {},
                 "resolve": {},
                 "list": {},
                 "find": {},
@@ -637,6 +657,7 @@ typer_app.command("resolve")(resolve.resolve_target)
 
 # Move channel metadata lookup to channel namespace.
 resolve.channel_app.command("describe")(client.get_channel_info)
+resolve.channel_app.command("tab")(client.get_channel_tab)
 
 
 def main():

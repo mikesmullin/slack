@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import re
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Optional
@@ -324,6 +325,295 @@ async def execute_js(request: Request):
         return {"success": True, "result": result}
     except Exception as e:
         logger.error(f"JS execution failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/xhr")
+async def xhr_proxy(request: Request):
+    """Fetch a URL using the authenticated browser session.
+
+    Supports regular fetch() and optional navigation fallback for URLs that
+    reject cross-origin XHR/fetch from app.slack.com.
+    """
+    global session
+
+    body = await request.json()
+    url = body.get("url")
+    method = str(body.get("method", "GET") or "GET").upper()
+    headers = body.get("headers") or {}
+    payload = body.get("body")
+    timeout_ms = int(body.get("timeout_ms", 30000) or 30000)
+    navigation_fallback = bool(body.get("navigation_fallback", False))
+
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing 'url' in request body")
+
+    if not session:
+        raise HTTPException(status_code=503, detail="Browser not initialized")
+
+    try:
+        page = await session.get_current_page()
+
+        fetch_script = """(req) => {
+            return new Promise((resolve) => {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), req.timeoutMs || 30000);
+
+                const options = {
+                    method: req.method || 'GET',
+                    credentials: 'include',
+                    headers: req.headers || {},
+                    signal: controller.signal,
+                };
+
+                if (req.body !== undefined && req.body !== null) {
+                    options.body = req.body;
+                }
+
+                fetch(req.url, options)
+                    .then(async (response) => {
+                        clearTimeout(timeout);
+                        const responseHeaders = {};
+                        response.headers.forEach((value, key) => {
+                            responseHeaders[key] = value;
+                        });
+                        const text = await response.text();
+                        resolve({
+                            ok: true,
+                            status: response.status,
+                            status_text: response.statusText,
+                            url: response.url,
+                            content_type: response.headers.get('content-type') || '',
+                            headers: responseHeaders,
+                            body: text,
+                        });
+                    })
+                    .catch((error) => {
+                        clearTimeout(timeout);
+                        resolve({
+                            ok: false,
+                            error: String(error),
+                        });
+                    });
+            });
+        }"""
+
+        result = await page.evaluate(
+            fetch_script,
+            {
+                "url": url,
+                "method": method,
+                "headers": headers,
+                "body": payload,
+                "timeoutMs": timeout_ms,
+            },
+        )
+
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                result = {"ok": True, "body": result}
+
+        if result.get("ok"):
+            return result
+
+        if not navigation_fallback:
+            return result
+
+        # Fallback: open URL in a temporary tab/page to avoid reloading the active Slack page.
+        temp_page = None
+        tabs_before = []
+        downloads_before = []
+        downloads_mtime_before: dict[str, float] = {}
+        fallback_start_ts = time.time()
+
+        def _build_download_result(download_path: str) -> dict:
+            p = Path(download_path)
+
+            # Chrome may emit a temporary .crdownload path first; prefer the finalized
+            # file when available.
+            if p.suffix.lower() == ".crdownload":
+                finalized = p.with_suffix("")
+                for _ in range(25):
+                    if finalized.exists() and finalized.stat().st_size > 0:
+                        p = finalized
+                        break
+                    time.sleep(0.1)
+
+            try:
+                raw = p.read_bytes()
+            except Exception as read_err:
+                raise RuntimeError(f"Failed to read downloaded file {download_path}: {read_err}")
+
+            body_text = raw.decode("utf-8", errors="replace")
+            suffix = p.suffix.lower()
+            content_type = "text/plain"
+            if suffix in {".html", ".htm"}:
+                content_type = "text/html"
+            elif suffix in {".json"}:
+                content_type = "application/json"
+
+            return {
+                "ok": True,
+                "status": 200,
+                "status_text": "OK",
+                "url": str(url),
+                "content_type": content_type,
+                "body": body_text,
+                "fallback": "download-file",
+                "download_path": str(p),
+            }
+
+        try:
+            tabs_before = await session.get_tabs()
+            downloads_before = list(getattr(session, "downloaded_files", []) or [])
+            for p in downloads_before:
+                try:
+                    downloads_mtime_before[p] = Path(p).stat().st_mtime
+                except Exception:
+                    downloads_mtime_before[p] = 0.0
+
+            await session.navigate_to(url, new_tab=True)
+            temp_page = await session.get_current_page()
+            if temp_page is None:
+                raise RuntimeError("new-tab fallback did not return a current page")
+
+            # Wait for initial document readiness before scraping HTML.
+            for _ in range(20):
+                try:
+                    current_href = await temp_page.evaluate("""() => window.location.href""")
+                    ready = await temp_page.evaluate("""() => document.readyState""")
+                    if ready in {"interactive", "complete"} and current_href and current_href != "about:blank":
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+
+            nav_result = await temp_page.evaluate(
+                """() => ({
+                    ok: true,
+                    status: 200,
+                    status_text: 'OK',
+                    url: window.location.href,
+                    content_type: document.contentType || '',
+                    title: document.title || '',
+                    body: document.documentElement ? document.documentElement.outerHTML : '',
+                })"""
+            )
+            if isinstance(nav_result, str):
+                try:
+                    nav_result = json.loads(nav_result)
+                except Exception:
+                    nav_result = {"ok": True, "body": nav_result}
+            nav_result["fallback"] = "new_page"
+            return nav_result
+        except Exception as page_err:
+            # Downloads can intentionally abort navigation (net::ERR_ABORTED); if a new
+            # file was tracked, return its contents as the successful fallback result.
+            selected_download = None
+            for _ in range(20):
+                downloads_after = list(getattr(session, "downloaded_files", []) or [])
+                new_paths = [p for p in downloads_after if p not in downloads_before]
+                if new_paths:
+                    selected_download = new_paths[-1]
+                    break
+
+                # browser-use only tracks unique paths; repeated downloads can overwrite
+                # the same file path. Detect those by mtime bumps.
+                changed_paths = []
+                for p in downloads_after:
+                    try:
+                        mtime = Path(p).stat().st_mtime
+                    except Exception:
+                        continue
+                    prev_mtime = downloads_mtime_before.get(p, 0.0)
+                    if mtime > max(prev_mtime, fallback_start_ts - 0.2):
+                        changed_paths.append((mtime, p))
+                if changed_paths:
+                    changed_paths.sort()
+                    selected_download = changed_paths[-1][1]
+                    break
+
+                # Last resort: look for any very recent file under browser-use download dirs.
+                recent_files = []
+                try:
+                    for candidate in Path("/private/tmp").glob("browser-use-downloads-*/*"):
+                        if not candidate.is_file():
+                            continue
+                        try:
+                            st = candidate.stat()
+                        except Exception:
+                            continue
+                        if st.st_mtime >= fallback_start_ts - 0.2 and st.st_size > 0:
+                            recent_files.append((st.st_mtime, str(candidate)))
+                except Exception:
+                    recent_files = []
+                if recent_files:
+                    # Prefer non-temporary completed files when both are present.
+                    recent_files.sort(key=lambda item: (not item[1].endswith('.crdownload'), item[0]))
+                    selected_download = recent_files[-1][1]
+                    break
+
+                await asyncio.sleep(0.1)
+            if selected_download:
+                logger.info(f"/xhr using download-file fallback: {selected_download}")
+                return _build_download_result(selected_download)
+
+            logger.warning(f"/xhr temp-page fallback failed, trying legacy navigation fallback: {page_err}")
+
+            # Last-resort legacy behavior if temp-page strategy fails.
+            previous_url = await session.get_current_page_url()
+            try:
+                await session.navigate_to(url)
+                nav_page = await session.get_current_page()
+                nav_result = await nav_page.evaluate(
+                    """() => ({
+                        ok: true,
+                        status: 200,
+                        status_text: 'OK',
+                        url: window.location.href,
+                        content_type: document.contentType || '',
+                        title: document.title || '',
+                        body: document.documentElement ? document.documentElement.outerHTML : '',
+                    })"""
+                )
+                if isinstance(nav_result, str):
+                    try:
+                        nav_result = json.loads(nav_result)
+                    except Exception:
+                        nav_result = {"ok": True, "body": nav_result}
+                nav_result["fallback"] = "navigation"
+                return nav_result
+            finally:
+                if previous_url:
+                    try:
+                        await session.navigate_to(previous_url)
+                    except Exception as nav_err:
+                        logger.warning(f"Failed to restore previous URL after /xhr fallback: {nav_err}")
+        finally:
+            # Close any tabs that were opened by the temp-page fallback flow.
+            try:
+                tabs_after = await session.get_tabs()
+                before_ids = {getattr(t, "target_id", "") for t in tabs_before}
+                new_targets = [getattr(t, "target_id", "") for t in tabs_after if getattr(t, "target_id", "") not in before_ids]
+                for target_id in new_targets:
+                    if target_id:
+                        try:
+                            await session.close_page(target_id)
+                        except Exception as close_target_err:
+                            logger.warning(f"Failed to close fallback-opened tab {target_id}: {close_target_err}")
+            except Exception as tabs_err:
+                logger.warning(f"Failed to reconcile tabs after /xhr fallback: {tabs_err}")
+
+            if temp_page is not None:
+                try:
+                    await session.close_page(temp_page)
+                except Exception as close_err:
+                    logger.warning(f"Failed to close temporary /xhr fallback page: {close_err}")
+
+    except Exception as e:
+        logger.error(f"XHR proxy failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/navigate")

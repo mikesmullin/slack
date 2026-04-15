@@ -7,6 +7,7 @@ import json
 import httpx
 import os
 import re
+from typing import Any
 
 from ..utils import (
     get_client,
@@ -535,7 +536,270 @@ def get_channel_info(channel: str = typer.Argument(..., help="Channel name or ID
     ch = resolve_channel(channel)
     params = {"channel": ch["id"]}
     data = _post_api("conversations.info", params)
+    if data.get("ok") and data.get("channel"):
+        data["channel"]["tabs_resolved"] = _resolve_channel_tabs(data["channel"])
     print(yaml.dump(data, indent=2, sort_keys=False))
+
+
+def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build a stable tab list enriched with names and URLs where available."""
+    props = channel_data.get("properties", {}) or {}
+    meeting_notes_file_id = (props.get("meeting_notes") or {}).get("file_id")
+
+    raw_tabs: list[dict[str, Any]] = []
+    for key in ("tabs", "tabz"):
+        value = props.get(key)
+        if isinstance(value, list):
+            raw_tabs.extend([tab for tab in value if isinstance(tab, dict)])
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for tab in raw_tabs:
+        tab_id = str(tab.get("id") or "")
+        tab_type = str(tab.get("type") or "")
+        label = str(tab.get("label") or "")
+        file_id = str((tab.get("data") or {}).get("file_id") or "")
+        if not file_id and tab_type == "channel_canvas" and meeting_notes_file_id:
+            file_id = str(meeting_notes_file_id)
+
+        # tabz can contain duplicate rows with empty IDs. Normalize to a stable key
+        # so named lookups remain deterministic.
+        normalized_id = tab_id or tab_type
+        dedupe_key = (normalized_id, tab_type, file_id)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        deduped.append(
+            {
+                "index": len(deduped) + 1,
+                "id": tab_id,
+                "type": tab_type,
+                "label": label,
+                "file_id": file_id,
+                "name": label or tab_type or tab_id,
+                "url": None,
+                "download_url": None,
+                "permalink": None,
+            }
+        )
+
+    file_cache: dict[str, dict[str, Any]] = {}
+    for tab in deduped:
+        file_id = tab.get("file_id")
+        if not file_id:
+            continue
+
+        if file_id not in file_cache:
+            info = _post_api("files.info", {"file": file_id})
+            file_cache[file_id] = info if isinstance(info, dict) else {}
+
+        info = file_cache[file_id]
+        if not info.get("ok"):
+            continue
+
+        file_obj = info.get("file", {}) if isinstance(info.get("file", {}), dict) else {}
+        title = (file_obj.get("title") or file_obj.get("name") or "").strip()
+        if title:
+            tab["name"] = title
+            if not tab.get("label"):
+                tab["label"] = title
+        tab["url"] = file_obj.get("url_private")
+        tab["download_url"] = file_obj.get("url_private_download")
+        tab["permalink"] = file_obj.get("permalink")
+
+    return deduped
+
+
+def _select_channel_tab(tab_selector: str, tabs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Select a tab by 1-based index or by case-insensitive name/id/type match."""
+    selector = tab_selector.strip()
+    if not selector:
+        return None
+
+    if selector.isdigit():
+        idx = int(selector)
+        if 1 <= idx <= len(tabs):
+            return tabs[idx - 1]
+        if 0 <= idx < len(tabs):
+            return tabs[idx]
+        return None
+
+    lowered = selector.lower()
+    exact_matches = []
+    for tab in tabs:
+        candidates = {
+            str(tab.get("name") or "").lower(),
+            str(tab.get("label") or "").lower(),
+            str(tab.get("id") or "").lower(),
+            str(tab.get("type") or "").lower(),
+            str(tab.get("file_id") or "").lower(),
+        }
+        if lowered in candidates:
+            exact_matches.append(tab)
+
+    if len(exact_matches) == 1:
+        return exact_matches[0]
+    if len(exact_matches) > 1:
+        # Prefer tabs we can fetch, then preserve list order for stable behavior.
+        fetchable = [t for t in exact_matches if t.get("url") or t.get("download_url")]
+        return fetchable[0] if fetchable else exact_matches[0]
+
+    partial_matches = []
+    for tab in tabs:
+        haystack = " ".join(
+            [
+                str(tab.get("name") or ""),
+                str(tab.get("label") or ""),
+                str(tab.get("id") or ""),
+                str(tab.get("type") or ""),
+                str(tab.get("file_id") or ""),
+            ]
+        ).lower()
+        if lowered in haystack:
+            partial_matches.append(tab)
+
+    if len(partial_matches) == 1:
+        return partial_matches[0]
+    if len(partial_matches) > 1:
+        fetchable = [t for t in partial_matches if t.get("url") or t.get("download_url")]
+        return fetchable[0] if fetchable else partial_matches[0]
+    return None
+
+
+def get_channel_tab(
+    target: str = typer.Argument(..., help="Channel name or ID"),
+    tab: str = typer.Argument(..., help="Tab index (1-based) or tab name"),
+    download: bool = typer.Option(
+        False,
+        "--download",
+        help="Use download URL when available (for file-backed tabs)",
+    ),
+    navigation_fallback: bool = typer.Option(
+        True,
+        "--navigation-fallback",
+        help="Allow full-page navigation fallback when fetch() is blocked (can visibly reload Slack UI)",
+    ),
+    yaml_output: bool = typer.Option(
+        False,
+        "--yaml",
+        help="Print tab metadata and fetched response instead of raw body",
+    ),
+):
+    """Fetch a channel tab body through the authenticated browser server proxy."""
+    ch = resolve_channel(target)
+    info = _post_api("conversations.info", {"channel": ch["id"]})
+    if not info.get("ok"):
+        print(yaml.dump(info, indent=2, sort_keys=False), file=sys.stderr)
+        sys.exit(1)
+
+    channel_obj = info.get("channel", {}) if isinstance(info.get("channel", {}), dict) else {}
+    tabs = _resolve_channel_tabs(channel_obj)
+    if not tabs:
+        print("No tabs found for channel.", file=sys.stderr)
+        sys.exit(1)
+
+    selected = _select_channel_tab(tab, tabs)
+    if not selected:
+        listing = [
+            {
+                "index": t.get("index"),
+                "name": t.get("name"),
+                "type": t.get("type"),
+                "id": t.get("id"),
+            }
+            for t in tabs
+        ]
+        print(
+            yaml.dump(
+                {
+                    "ok": False,
+                    "error": f"tab_not_found: {tab}",
+                    "available_tabs": listing,
+                },
+                indent=2,
+                sort_keys=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    url = selected.get("download_url") if download else selected.get("url")
+    if not url:
+        print(
+            yaml.dump(
+                {
+                    "ok": False,
+                    "error": "tab_has_no_fetchable_url",
+                    "tab": selected,
+                },
+                indent=2,
+                sort_keys=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        with get_client() as http_client:
+            resp = http_client.post(
+                f"{SERVER_URL}/xhr",
+                json={
+                    "url": url,
+                    "method": "GET",
+                    "navigation_fallback": navigation_fallback,
+                },
+            )
+            resp.raise_for_status()
+            xhr_data = _parse_response_data(resp)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if not xhr_data.get("ok"):
+        error_text = xhr_data.get("error", "xhr_failed")
+        print(
+            yaml.dump(
+                {
+                    "ok": False,
+                    "error": error_text,
+                    "tab": selected,
+                    "url": url,
+                },
+                indent=2,
+                sort_keys=False,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if yaml_output:
+        print(
+            yaml.dump(
+                {
+                    "ok": True,
+                    "channel": {
+                        "id": channel_obj.get("id"),
+                        "name": channel_obj.get("name"),
+                    },
+                    "tab": selected,
+                    "fetch": {
+                        "status": xhr_data.get("status"),
+                        "status_text": xhr_data.get("status_text"),
+                        "url": xhr_data.get("url"),
+                        "content_type": xhr_data.get("content_type"),
+                        "fallback": xhr_data.get("fallback"),
+                        "download_path": xhr_data.get("download_path"),
+                    },
+                    "body": xhr_data.get("body", ""),
+                },
+                indent=2,
+                sort_keys=False,
+            )
+        )
+        return
+
+    print(xhr_data.get("body", ""))
 
 
 def read_message(

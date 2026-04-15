@@ -76,6 +76,7 @@ The unified target parser (used by `resolve`, `read-message`, `post-message`) ac
 - `post-reaction`
 - `channel`
   - `describe`
+  - `tab`
   - `resolve`
   - `list`
   - `find`
@@ -298,6 +299,26 @@ slack-chat inbox list [--type TYPE] [--limit N] [--since DATE] [--all] [--online
 ### `slack-chat channel describe`
 - Purpose: fetch channel metadata.
 - Usage: `slack-chat channel describe <channel>`
+- Notes:
+  - Output includes `channel.tabs_resolved` with stable tab index, tab name, and URLs (when tab is file-backed, e.g. canvas).
+
+### `slack-chat channel tab`
+- Purpose: fetch one channel tab body/content via authenticated browser server proxy.
+- Usage: `slack-chat channel tab <channel> <tab> [--download] [--yaml]`
+- `tab` selector accepts:
+  - 1-based index (for example `1`)
+  - tab name (for example `Project Notes`)
+- Examples (sanitized):
+```bash
+# Inspect tabs (index/name/url metadata)
+slack-chat channel describe #example-team
+
+# Fetch a canvas tab by name
+slack-chat channel tab #example-team "Project Notes" --yaml
+
+# Fetch the same tab by index
+slack-chat channel tab #example-team 1 --yaml
+```
 
 ### `slack-chat channel resolve`
 - Purpose: resolve channel ID/name.
