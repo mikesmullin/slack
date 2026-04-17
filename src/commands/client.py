@@ -7,7 +7,8 @@ import json
 import httpx
 import os
 import re
-from typing import Any
+from urllib.parse import urlparse
+from typing import Any, Optional
 
 from ..utils import (
     get_client,
@@ -544,6 +545,7 @@ def get_channel_info(channel: str = typer.Argument(..., help="Channel name or ID
 def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build a stable tab list enriched with names and URLs where available."""
     props = channel_data.get("properties", {}) or {}
+    channel_id = str(channel_data.get("id") or "")
     meeting_notes_file_id = (props.get("meeting_notes") or {}).get("file_id")
 
     raw_tabs: list[dict[str, Any]] = []
@@ -558,6 +560,7 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
         tab_id = str(tab.get("id") or "")
         tab_type = str(tab.get("type") or "")
         label = str(tab.get("label") or "")
+        folder_bookmark_id = str((tab.get("data") or {}).get("folder_bookmark_id") or "")
         file_id = str((tab.get("data") or {}).get("file_id") or "")
         if not file_id and tab_type == "channel_canvas" and meeting_notes_file_id:
             file_id = str(meeting_notes_file_id)
@@ -577,6 +580,9 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "type": tab_type,
                 "label": label,
                 "file_id": file_id,
+                "folder_bookmark_id": folder_bookmark_id,
+                "folder_path": "",
+                "path": label or tab_type or tab_id,
                 "name": label or tab_type or tab_id,
                 "url": None,
                 "download_url": None,
@@ -585,10 +591,10 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
         )
 
     file_cache: dict[str, dict[str, Any]] = {}
-    for tab in deduped:
-        file_id = tab.get("file_id")
+
+    def _enrich_from_file(tab: dict[str, Any], file_id: str):
         if not file_id:
-            continue
+            return
 
         if file_id not in file_cache:
             info = _post_api("files.info", {"file": file_id})
@@ -596,7 +602,7 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
 
         info = file_cache[file_id]
         if not info.get("ok"):
-            continue
+            return
 
         file_obj = info.get("file", {}) if isinstance(info.get("file", {}), dict) else {}
         title = (file_obj.get("title") or file_obj.get("name") or "").strip()
@@ -604,9 +610,102 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
             tab["name"] = title
             if not tab.get("label"):
                 tab["label"] = title
+            if tab.get("folder_path"):
+                tab["path"] = f"{tab['folder_path']}/{title}"
+            else:
+                tab["path"] = title
         tab["url"] = file_obj.get("url_private")
         tab["download_url"] = file_obj.get("url_private_download")
         tab["permalink"] = file_obj.get("permalink")
+
+    for tab in deduped:
+        _enrich_from_file(tab, str(tab.get("file_id") or ""))
+
+    # Expand nested folder items via bookmarks API (folder tabs reference bookmark IDs).
+    if channel_id:
+        bookmarks_data = _post_api("bookmarks.list", {"channel_id": channel_id})
+        bookmarks = bookmarks_data.get("bookmarks", []) if bookmarks_data.get("ok") else []
+        children_by_parent: dict[str, list[dict[str, Any]]] = {}
+        for bm in bookmarks:
+            if not isinstance(bm, dict):
+                continue
+            parent_id = str(bm.get("parent_id") or "")
+            if not parent_id:
+                continue
+            children_by_parent.setdefault(parent_id, []).append(bm)
+
+        # Stable ordering: Slack rank first, then title.
+        for parent_id, items in children_by_parent.items():
+            items.sort(key=lambda i: (str(i.get("rank") or ""), str(i.get("title") or "").lower()))
+
+        existing_keys = {
+            (
+                str(t.get("type") or ""),
+                str(t.get("id") or ""),
+                str(t.get("file_id") or ""),
+                str(t.get("folder_path") or ""),
+            )
+            for t in deduped
+        }
+
+        folder_roots = [
+            t for t in deduped
+            if str(t.get("type") or "") == "folder" and str(t.get("folder_bookmark_id") or "")
+        ]
+
+        def _walk_folder(folder_bookmark_id: str, folder_path: str):
+            for bm in children_by_parent.get(folder_bookmark_id, []):
+                bm_id = str(bm.get("id") or "")
+                bm_type = str(bm.get("type") or "")
+                bm_title = str(bm.get("title") or bm.get("entity_id") or bm_id or bm_type)
+                child_folder_path = folder_path
+
+                if bm_type == "folder":
+                    next_path = f"{folder_path}/{bm_title}" if folder_path else bm_title
+                    _walk_folder(bm_id, next_path)
+                    continue
+
+                file_id = ""
+                entity_id = str(bm.get("entity_id") or "")
+                if entity_id.startswith("F"):
+                    file_id = entity_id
+
+                entry = {
+                    "index": len(deduped) + 1,
+                    "id": bm_id,
+                    "bookmark_id": bm_id,
+                    "type": bm_type or "bookmark",
+                    "label": bm_title,
+                    "file_id": file_id,
+                    "folder_bookmark_id": folder_bookmark_id,
+                    "folder_path": child_folder_path,
+                    "path": f"{child_folder_path}/{bm_title}" if child_folder_path else bm_title,
+                    "name": bm_title,
+                    "url": bm.get("link"),
+                    "download_url": None,
+                    "permalink": bm.get("link"),
+                }
+                _enrich_from_file(entry, file_id)
+
+                key = (
+                    str(entry.get("type") or ""),
+                    str(entry.get("id") or ""),
+                    str(entry.get("file_id") or ""),
+                    str(entry.get("folder_path") or ""),
+                )
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                deduped.append(entry)
+
+        for root in folder_roots:
+            folder_id = str(root.get("folder_bookmark_id") or "")
+            root_name = str(root.get("label") or root.get("name") or "")
+            _walk_folder(folder_id, root_name)
+
+    # Re-number indexes after folder expansion.
+    for idx, tab in enumerate(deduped, start=1):
+        tab["index"] = idx
 
     return deduped
 
@@ -630,10 +729,13 @@ def _select_channel_tab(tab_selector: str, tabs: list[dict[str, Any]]) -> dict[s
     for tab in tabs:
         candidates = {
             str(tab.get("name") or "").lower(),
+            str(tab.get("path") or "").lower(),
             str(tab.get("label") or "").lower(),
             str(tab.get("id") or "").lower(),
             str(tab.get("type") or "").lower(),
             str(tab.get("file_id") or "").lower(),
+            str(tab.get("url") or "").lower(),
+            str(tab.get("permalink") or "").lower(),
         }
         if lowered in candidates:
             exact_matches.append(tab)
@@ -650,10 +752,13 @@ def _select_channel_tab(tab_selector: str, tabs: list[dict[str, Any]]) -> dict[s
         haystack = " ".join(
             [
                 str(tab.get("name") or ""),
+                str(tab.get("path") or ""),
                 str(tab.get("label") or ""),
                 str(tab.get("id") or ""),
                 str(tab.get("type") or ""),
                 str(tab.get("file_id") or ""),
+                str(tab.get("url") or ""),
+                str(tab.get("permalink") or ""),
             ]
         ).lower()
         if lowered in haystack:
@@ -667,9 +772,31 @@ def _select_channel_tab(tab_selector: str, tabs: list[dict[str, Any]]) -> dict[s
     return None
 
 
+def _looks_like_url(value: str) -> bool:
+    try:
+        parsed = urlparse((value or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    except Exception:
+        return False
+
+
+def _fetch_url_via_server(url: str, navigation_fallback: bool) -> dict[str, Any]:
+    with get_client() as http_client:
+        resp = http_client.post(
+            f"{SERVER_URL}/xhr",
+            json={
+                "url": url,
+                "method": "GET",
+                "navigation_fallback": navigation_fallback,
+            },
+        )
+        resp.raise_for_status()
+        return _parse_response_data(resp)
+
+
 def get_channel_tab(
-    target: str = typer.Argument(..., help="Channel name or ID"),
-    tab: str = typer.Argument(..., help="Tab index (1-based) or tab name"),
+    target: str = typer.Argument(..., help="Channel name/ID OR a tab URL"),
+    tab: Optional[str] = typer.Argument(None, help="Tab index (1-based) or tab name"),
     download: bool = typer.Option(
         False,
         "--download",
@@ -687,6 +814,60 @@ def get_channel_tab(
     ),
 ):
     """Fetch a channel tab body through the authenticated browser server proxy."""
+    # URL-only mode: allow `slack-chat channel tab <url>`
+    if tab is None and _looks_like_url(target):
+        try:
+            xhr_data = _fetch_url_via_server(target, navigation_fallback)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if not xhr_data.get("ok"):
+            print(
+                yaml.dump(
+                    {
+                        "ok": False,
+                        "error": xhr_data.get("error", "xhr_failed"),
+                        "url": target,
+                    },
+                    indent=2,
+                    sort_keys=False,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if yaml_output:
+            print(
+                yaml.dump(
+                    {
+                        "ok": True,
+                        "fetch": {
+                            "status": xhr_data.get("status"),
+                            "status_text": xhr_data.get("status_text"),
+                            "url": xhr_data.get("url") or target,
+                            "content_type": xhr_data.get("content_type"),
+                            "fallback": xhr_data.get("fallback"),
+                            "download_path": xhr_data.get("download_path"),
+                        },
+                        "body": xhr_data.get("body", ""),
+                    },
+                    indent=2,
+                    sort_keys=False,
+                )
+            )
+            return
+
+        print(xhr_data.get("body", ""))
+        return
+
+    if tab is None:
+        print(
+            "Error: missing TAB selector. Use `slack-chat channel tab <channel> <tab>` or `slack-chat channel tab <url>`.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     ch = resolve_channel(target)
     info = _post_api("conversations.info", {"channel": ch["id"]})
     if not info.get("ok"):
@@ -741,17 +922,7 @@ def get_channel_tab(
         sys.exit(1)
 
     try:
-        with get_client() as http_client:
-            resp = http_client.post(
-                f"{SERVER_URL}/xhr",
-                json={
-                    "url": url,
-                    "method": "GET",
-                    "navigation_fallback": navigation_fallback,
-                },
-            )
-            resp.raise_for_status()
-            xhr_data = _parse_response_data(resp)
+        xhr_data = _fetch_url_via_server(url, navigation_fallback)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

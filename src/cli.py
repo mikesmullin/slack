@@ -393,16 +393,19 @@ channel tab
 
 Usage:
     slack-chat channel tab <channel> <tab> [--download] [--navigation-fallback] [--yaml]
+    slack-chat channel tab <url> [--navigation-fallback] [--yaml]
 
 Description:
     Resolve and fetch one channel tab through the authenticated browser server.
     Uses XHR/fetch first with navigation fallback enabled by default.
-    <tab> can be a 1-based index or a tab name/id.
+    <tab> can be a 1-based index, tab name, path, or URL.
 
 Examples:
     slack-chat channel tab #example-team 1
     slack-chat channel tab #example-team "Project Notes"
+    slack-chat channel tab #example-team "Folder A/Project Notes"
     slack-chat channel tab C05R34P9KAA "Project Notes" --download
+    slack-chat channel tab "https://files.slack.com/files-pri/T123-F123/canvas" --yaml
     slack-chat channel tab #example-team "Project Notes" --navigation-fallback
 """.strip(),
         ("channel", "resolve"): """
