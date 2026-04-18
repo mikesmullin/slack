@@ -1082,6 +1082,10 @@ def read_message(
     timestamp = context["timestamp"]
     thread_ts = context["thread_ts"]
     target_summary = context["target_summary"]
+    channel_meta = {
+        "id": resolved_channel_id,
+        "name": channel_name,
+    }
 
     # Around mode: merge message around functionality into read-message.
     if before is not None or after is not None:
@@ -1106,6 +1110,7 @@ def read_message(
             output = {
                 "target": target,
                 "target_summary": target_summary,
+                "channel": channel_meta,
                 "context_type": "thread" if thread_ts else "channel",
                 "before": before_n,
                 "after": after_n,
@@ -1137,7 +1142,11 @@ def read_message(
         )
 
         if yaml_output:
-            print(yaml.dump(data, indent=2, sort_keys=False))
+            output = {
+                **data,
+                "channel": channel_meta,
+            }
+            print(yaml.dump(output, indent=2, sort_keys=False))
             return
 
         if not data.get("ok"):
@@ -1168,6 +1177,7 @@ def read_message(
         if yaml_output:
             output = {
                 **data,
+                "channel": channel_meta,
                 "anchor_timestamp": timestamp,
                 "ordering": "chronological",
             }
@@ -1198,7 +1208,11 @@ def read_message(
     )
 
     if yaml_output:
-        print(yaml.dump(data, indent=2, sort_keys=False))
+        output = {
+            **data,
+            "channel": channel_meta,
+        }
+        print(yaml.dump(output, indent=2, sort_keys=False))
         return
 
     if not data.get("ok"):
