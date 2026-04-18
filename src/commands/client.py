@@ -77,6 +77,25 @@ def _clean_text(text: str) -> str:
     return (text or "").replace("\n", " ").strip()
 
 
+def _normalize_slack_ts(ts: str | None) -> str | None:
+    """Normalize Slack timestamps to float-string form seconds.micros.
+
+    Accepts compact numeric forms like 1776465637929309 and converts them to
+    1776465637.929309.
+    """
+    if not ts:
+        return ts
+
+    value = str(ts).strip()
+    if not value:
+        return None
+    if "." in value:
+        return value
+    if value.isdigit() and len(value) > 10:
+        return f"{value[:-6]}.{value[-6:]}"
+    return value
+
+
 def _display_user(client: httpx.Client, message: dict) -> str:
     user_id = message.get("user")
     if user_id:
@@ -233,6 +252,71 @@ def _fetch_page(endpoint: str, base_params: dict, count: int, page: int) -> tupl
         current_page += 1
 
 
+def _fetch_channel_from_timestamp(
+    channel_id: str,
+    timestamp: str,
+    count: int,
+    page: int,
+) -> tuple[dict, int]:
+    """Fetch channel messages starting near the provided timestamp.
+
+    Returns messages in chronological order (oldest -> newest) beginning from
+    the nearest message at/after `timestamp`.
+    """
+    page = max(1, page)
+    ts = _normalize_slack_ts(timestamp) or timestamp
+    limit = max(200, count)
+
+    all_messages: list[dict] = []
+    seen_ts: set[str] = set()
+    cursor = None
+    target_needed = page * count
+    upstream_has_more = False
+
+    while True:
+        params = {
+            "channel": channel_id,
+            "oldest": ts,
+            "inclusive": True,
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        data = _post_api("conversations.history", params)
+        if not data.get("ok"):
+            return data, page
+
+        for msg in data.get("messages", []):
+            msg_ts = str(msg.get("ts") or "")
+            if not msg_ts or msg_ts in seen_ts:
+                continue
+            seen_ts.add(msg_ts)
+            all_messages.append(msg)
+
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        upstream_has_more = bool(data.get("has_more") or cursor)
+
+        # We need enough rows to satisfy requested page from oldest-first view.
+        if len(all_messages) >= target_needed or not cursor:
+            break
+
+    all_messages.sort(key=lambda m: float(str(m.get("ts") or "0") or "0"))
+    start = (page - 1) * count
+    end = start + count
+    page_messages = all_messages[start:end]
+
+    has_more = bool(end < len(all_messages) or upstream_has_more)
+    return {
+        "ok": True,
+        "messages": page_messages,
+        "has_more": has_more,
+        "response_metadata": {
+            "next_cursor": cursor or "",
+        },
+    }, page
+
+
 def _print_read_text(
     target_summary: str,
     channel_name: str,
@@ -304,6 +388,9 @@ def _build_target_context(target: str) -> dict:
         channel_id = parsed_url["channel_id"]
         timestamp = parsed_url["timestamp"]
         thread_ts = parsed_url.get("thread_ts")
+
+    timestamp = _normalize_slack_ts(timestamp)
+    thread_ts = _normalize_slack_ts(thread_ts)
 
     if timestamp and not thread_ts and channel_id:
         data = _post_api(
@@ -1066,6 +1153,39 @@ def read_message(
             count,
             actual_page,
             display_data,
+        )
+        return
+
+    # Channel mode anchored to timestamp without thread context.
+    if timestamp and not thread_ts:
+        data, actual_page = _fetch_channel_from_timestamp(
+            resolved_channel_id,
+            timestamp,
+            count,
+            page,
+        )
+
+        if yaml_output:
+            output = {
+                **data,
+                "anchor_timestamp": timestamp,
+                "ordering": "chronological",
+            }
+            print(yaml.dump(output, indent=2, sort_keys=False))
+            return
+
+        if not data.get("ok"):
+            print(yaml.dump(data, indent=2, sort_keys=False))
+            return
+
+        _print_read_text(
+            target_summary,
+            channel_name,
+            resolved_channel_id,
+            None,
+            count,
+            actual_page,
+            data,
         )
         return
 
