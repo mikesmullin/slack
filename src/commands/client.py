@@ -1002,12 +1002,12 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
                 "index": len(deduped) + 1,
                 "id": tab_id,
                 "type": tab_type,
-                "label": label,
+                "label": label or ("Files" if tab_type == "files" else ""),
                 "file_id": file_id,
                 "folder_bookmark_id": folder_bookmark_id,
                 "folder_path": "",
-                "path": label or tab_type or tab_id,
-                "name": label or tab_type or tab_id,
+                "path": label or ("Files" if tab_type == "files" else tab_type or tab_id),
+                "name": label or ("Files" if tab_type == "files" else tab_type or tab_id),
                 "url": None,
                 "download_url": None,
                 "permalink": None,
@@ -1126,6 +1126,54 @@ def _resolve_channel_tabs(channel_data: dict[str, Any]) -> list[dict[str, Any]]:
             folder_id = str(root.get("folder_bookmark_id") or "")
             root_name = str(root.get("label") or root.get("name") or "")
             _walk_folder(folder_id, root_name)
+
+        # Some channels expose a Files tab without bookmark folder metadata.
+        # In that case, surface canvas files under a virtual "Files" folder so
+        # name/path lookup can still resolve tabs like "SCR Naming on BKP/GCP".
+        has_files_tab = any(str(t.get("type") or "") == "files" for t in deduped)
+        has_folder_items = any(str(t.get("folder_path") or "") for t in deduped)
+        if has_files_tab and not has_folder_items:
+            files_data = _post_api("files.list", {"channel": channel_id, "count": 200})
+            files = files_data.get("files", []) if files_data.get("ok") else []
+            for f in files:
+                if not isinstance(f, dict):
+                    continue
+                file_id = str(f.get("id") or "")
+                if not file_id:
+                    continue
+
+                mimetype = str(f.get("mimetype") or "").lower()
+                pretty_type = str(f.get("pretty_type") or "").lower()
+                if mimetype != "application/vnd.slack-docs" and pretty_type != "canvas":
+                    continue
+
+                title = str(f.get("title") or f.get("name") or file_id)
+                entry = {
+                    "index": len(deduped) + 1,
+                    "id": file_id,
+                    "bookmark_id": "",
+                    "type": "files_canvas",
+                    "label": title,
+                    "file_id": file_id,
+                    "folder_bookmark_id": "",
+                    "folder_path": "Files",
+                    "path": f"Files/{title}",
+                    "name": title,
+                    "url": f.get("url_private"),
+                    "download_url": f.get("url_private_download"),
+                    "permalink": f.get("permalink"),
+                }
+
+                key = (
+                    str(entry.get("type") or ""),
+                    str(entry.get("id") or ""),
+                    str(entry.get("file_id") or ""),
+                    str(entry.get("folder_path") or ""),
+                )
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
+                deduped.append(entry)
 
     # Re-number indexes after folder expansion.
     for idx, tab in enumerate(deduped, start=1):
