@@ -163,24 +163,24 @@ pagination: page 1/12 | per_page 3 | total 34
 - Inline `<@USER...>` references in message bodies are expanded to `<Name|@USER_ID>`.
 
 ### `slack-chat read-message`
-- Purpose: unified read command (channel/thread pagination + around-mode context).
+- Purpose: unified read command (bounded cursor stream + around-mode context).
 - Usage:
 ```bash
-slack-chat read-message <target> [--count N] [--page N] [--before N] [--after N] [--yaml]
+slack-chat read-message <target> [--count N] [--before N] [--after N] [--yaml]
 ```
 - Modes:
-1. Paginated mode: use `--count`, `--page`.
+1. Cursor mode: use `--count`; when target includes `:TIMESTAMP` it resumes strictly after that timestamp.
 2. Around mode: use `-B/--before` and/or `-A/--after` with timestamped target.
 - Examples:
 ```bash
-slack-chat read-message C01ABCDEF2 -n 20 -p 1
-slack-chat read-message "C01ABCDEF2:1709253181.804579@1707924824.356449" -n 5 -p 1
+slack-chat read-message C01ABCDEF2 -n 20
+slack-chat read-message "C01ABCDEF2:1709253181.804579@1707924824.356449" -n 5
 slack-chat read-message "C01ABCDEF2:1709253181.804579@1707924824.356449" -B 2 -A 2
 ```
 - Default stdout format:
 ```text
 target: target_type=message_event, channel_id=C01ABCDEF2, channel_id_prefix_type=channel_public, channel_name=sre-team, timestamp=1709253181.804579, thread_ts=1707924824.356449, event_id=C01ABCDEF2:1709253181.804579@1707924824.356449
-pagination: page 1 | per_page 5 | total_estimate 9 | has_more true
+pagination: per_page 5 | returned 5 | has_more true
 #sre-team (C01ABCDEF2:1709253181.804579@1707924824.356449) Jane Doe (@U01ABCDEF2): Thanks.
 ```
 - Around-mode stdout shows `context: before X | after Y | returned Z` and marks the focal line with `[target]`.

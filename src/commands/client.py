@@ -14,6 +14,7 @@ from ..utils import (
     get_client,
     resolve_channel,
     SERVER_URL,
+    get_user_info,
     get_user_name_by_id,
     get_channel_name_by_id,
     format_event_id,
@@ -104,6 +105,67 @@ def _display_user(client: httpx.Client, message: dict) -> str:
     return message.get("username") or message.get("bot_id") or "unknown"
 
 
+def _warm_and_enrich_yaml_users(messages: list[dict]) -> None:
+    """Resolve unique message users and patch unknown YAML user labels.
+
+    Performs at most one remote lookup per unique user ID (cache-backed), then
+    updates message-level fields when they are missing/unknown.
+    """
+    if not isinstance(messages, list) or not messages:
+        return
+
+    user_ids: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        user_id = str(msg.get("user") or "").strip()
+        if not user_id or user_id in seen:
+            continue
+        seen.add(user_id)
+        user_ids.append(user_id)
+
+    if not user_ids:
+        return
+
+    resolved: dict[str, dict[str, str]] = {}
+    with get_client() as client:
+        for user_id in user_ids:
+            # Reuse shared cache-first resolver so this path stays DRY.
+            user_info = get_user_info(client, user_id)
+            display_name = str(user_info.get("display_name") or "").strip() or user_id
+            real_name = str(user_info.get("real_name") or "").strip() or display_name
+            resolved[user_id] = {
+                "display_name": display_name,
+                "real_name": real_name,
+            }
+
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        user_id = str(msg.get("user") or "").strip()
+        if not user_id or user_id not in resolved:
+            continue
+
+        names = resolved[user_id]
+        username = str(msg.get("username") or "").strip()
+        if not username or username.lower() == "unknown":
+            msg["username"] = names["display_name"]
+
+        profile = msg.get("user_profile")
+        if not isinstance(profile, dict):
+            profile = {}
+            msg["user_profile"] = profile
+
+        current_real = str(profile.get("real_name") or "").strip()
+        if not current_real or current_real.lower() == "unknown":
+            profile["real_name"] = names["real_name"]
+
+        current_display = str(profile.get("display_name") or "").strip()
+        if not current_display or current_display.lower() == "unknown":
+            profile["display_name"] = names["display_name"]
+
+
 def _format_inline_user_ref(client: httpx.Client, user_id: str, user_cache: dict) -> str:
     """Format an inline message-body user reference as <Name|@USER_ID>."""
     if user_id not in user_cache:
@@ -124,28 +186,88 @@ def _format_inline_user_ref(client: httpx.Client, user_id: str, user_cache: dict
     )
 
 
-def _format_message_text(client: httpx.Client, text: str, user_cache: dict) -> str:
+def _format_size_kb(size_bytes: int | float | str | None) -> str:
+    try:
+        size = int(size_bytes or 0)
+    except Exception:
+        size = 0
+    kb = max(1, round(size / 1024)) if size > 0 else 0
+    return f"{kb}kb" if kb else "unknown"
+
+
+def _image_file_summary(message: dict) -> str:
+    files = message.get("files")
+    if not isinstance(files, list) or not files:
+        return ""
+
+    parts: list[str] = []
+    for f in files:
+        if not isinstance(f, dict):
+            continue
+        mimetype = str(f.get("mimetype") or "").lower()
+        filetype = str(f.get("filetype") or "").lower()
+        if not mimetype.startswith("image/") and filetype not in {
+            "png",
+            "jpg",
+            "jpeg",
+            "gif",
+            "webp",
+            "bmp",
+            "tiff",
+            "svg",
+        }:
+            continue
+
+        download_url = str(
+            f.get("url_private")
+            or f.get("url_private_download")
+            or f.get("permalink")
+            or f.get("id")
+            or "image"
+        )
+        size = _format_size_kb(f.get("size"))
+        parts.append(f"(image: {download_url}, size: {size})")
+
+    return " ".join(parts)
+
+
+def _format_message_text(
+    client: httpx.Client,
+    text: str,
+    user_cache: dict,
+    message: dict | None = None,
+) -> str:
     """Expand inline Slack user refs and colorize body text consistently."""
     clean_text = _clean_text(text)
     pattern = re.compile(r"<@([UW][A-Z0-9]{8,})(?:\|[^>]+)?>")
+    image_summary = _image_file_summary(message or {})
 
     if not pattern.search(clean_text):
-        return _fg_rgb(clean_text, 218, 224, 232)
+        base = _fg_rgb(clean_text, 218, 224, 232)
+    else:
+        out = []
+        cursor = 0
+        for match in pattern.finditer(clean_text):
+            if match.start() > cursor:
+                out.append(_fg_rgb(clean_text[cursor:match.start()], 218, 224, 232))
 
-    out = []
-    cursor = 0
-    for match in pattern.finditer(clean_text):
-        if match.start() > cursor:
-            out.append(_fg_rgb(clean_text[cursor:match.start()], 218, 224, 232))
+            user_id = match.group(1)
+            out.append(_format_inline_user_ref(client, user_id, user_cache))
+            cursor = match.end()
 
-        user_id = match.group(1)
-        out.append(_format_inline_user_ref(client, user_id, user_cache))
-        cursor = match.end()
+        if cursor < len(clean_text):
+            out.append(_fg_rgb(clean_text[cursor:], 218, 224, 232))
 
-    if cursor < len(clean_text):
-        out.append(_fg_rgb(clean_text[cursor:], 218, 224, 232))
+        base = "".join(out)
 
-    return "".join(out)
+    if not image_summary:
+        return base
+
+    suffix = _fg_rgb(image_summary, 169, 188, 255)
+    if not clean_text.strip():
+        return suffix
+
+    return f"{base} {suffix}"
 
 
 def _search_result_event_id(message: dict) -> str:
@@ -216,7 +338,7 @@ def _print_search_text(query: str, data: dict):
             event_id = _search_result_event_id(msg)
             channel_display = _search_result_channel_display(client, msg, event_id)
             who = _display_user(client, msg)
-            text = _format_message_text(client, msg.get("text", ""), inline_user_cache)
+            text = _format_message_text(client, msg.get("text", ""), inline_user_cache, msg)
             print(
                 f"{_fg_rgb(channel_display, 66, 184, 131)} "
                 f"{_fg_rgb(who, 193, 145, 255)}"
@@ -225,96 +347,316 @@ def _print_search_text(query: str, data: dict):
             )
 
 
-def _fetch_page(endpoint: str, base_params: dict, count: int, page: int) -> tuple[dict, int]:
-    """Fetch a cursor-paginated endpoint at a 1-based page index."""
-    page = max(1, page)
+def _ts_to_float(ts: str | None) -> float:
+    try:
+        return float(str(ts or "0"))
+    except Exception:
+        return 0.0
+
+
+def _find_exact_message(channel_id: str, ts: str) -> dict | None:
+    data = _post_api(
+        "conversations.history",
+        {
+            "channel": channel_id,
+            "oldest": ts,
+            "latest": ts,
+            "inclusive": True,
+            "limit": 1,
+        },
+    )
+    if not data.get("ok"):
+        return None
+    messages = data.get("messages", [])
+    if not messages:
+        return None
+    msg = messages[0]
+    if str(msg.get("ts") or "") != ts:
+        return None
+    return msg
+
+
+def _fetch_all_thread_replies(channel_id: str, thread_ts: str) -> list[dict]:
+    """Fetch all replies for a thread, excluding the parent/root message."""
     cursor = None
-    current_page = 1
-
-    while True:
-        params = {**base_params, "limit": count}
-        if cursor:
-            params["cursor"] = cursor
-
-        data = _post_api(endpoint, params)
-        if not data.get("ok"):
-            return data, current_page
-
-        if current_page >= page:
-            return data, current_page
-
-        cursor = data.get("response_metadata", {}).get("next_cursor", "")
-        if not cursor:
-            data["messages"] = []
-            data["has_more"] = False
-            return data, current_page
-
-        current_page += 1
-
-
-def _fetch_channel_from_timestamp(
-    channel_id: str,
-    timestamp: str,
-    count: int,
-    page: int,
-) -> tuple[dict, int]:
-    """Fetch channel messages starting near the provided timestamp.
-
-    Returns messages in chronological order (oldest -> newest) beginning from
-    the nearest message at/after `timestamp`.
-    """
-    page = max(1, page)
-    ts = _normalize_slack_ts(timestamp) or timestamp
-    limit = max(200, count)
-
-    all_messages: list[dict] = []
-    seen_ts: set[str] = set()
-    cursor = None
-    target_needed = page * count
-    upstream_has_more = False
+    out: list[dict] = []
+    seen: set[str] = set()
 
     while True:
         params = {
             "channel": channel_id,
-            "oldest": ts,
-            "inclusive": True,
-            "limit": limit,
+            "ts": thread_ts,
+            "limit": 200,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        data = _post_api("conversations.replies", params)
+        if not data.get("ok"):
+            break
+
+        for msg in data.get("messages", []):
+            msg_ts = str(msg.get("ts") or "")
+            if not msg_ts or msg_ts == thread_ts or msg_ts in seen:
+                continue
+            seen.add(msg_ts)
+            out.append(msg)
+
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            break
+
+    out.sort(key=lambda m: float(str(m.get("ts") or "0") or "0"))
+    return out
+
+
+def _emit_thread_after_cursor(
+    channel_id: str,
+    thread_ts: str,
+    cursor_ts: str,
+    remaining: int,
+    seen: set[str],
+) -> tuple[list[dict], int]:
+    replies = _fetch_all_thread_replies(channel_id, thread_ts)
+    cursor_val = _ts_to_float(cursor_ts)
+    emitted: list[dict] = []
+    for msg in replies:
+        msg_ts = str(msg.get("ts") or "")
+        if not msg_ts or msg_ts in seen:
+            continue
+        if _ts_to_float(msg_ts) <= cursor_val:
+            continue
+        emitted.append(msg)
+        seen.add(msg_ts)
+        remaining -= 1
+        if remaining <= 0:
+            break
+    return emitted, remaining
+
+
+def _emit_channel_with_threads_after_cursor(
+    channel_id: str,
+    root_cursor_ts: str | None,
+    remaining: int,
+    seen: set[str],
+) -> tuple[list[dict], int, bool]:
+    emitted: list[dict] = []
+    cursor = None
+    oldest = root_cursor_ts or "0"
+    batch_limit = max(200, remaining)
+    exhausted = False
+
+    while remaining > 0:
+        params = {
+            "channel": channel_id,
+            "oldest": oldest,
+            "inclusive": False,
+            "limit": batch_limit,
         }
         if cursor:
             params["cursor"] = cursor
 
         data = _post_api("conversations.history", params)
         if not data.get("ok"):
-            return data, page
-
-        for msg in data.get("messages", []):
-            msg_ts = str(msg.get("ts") or "")
-            if not msg_ts or msg_ts in seen_ts:
-                continue
-            seen_ts.add(msg_ts)
-            all_messages.append(msg)
-
-        cursor = data.get("response_metadata", {}).get("next_cursor", "")
-        upstream_has_more = bool(data.get("has_more") or cursor)
-
-        # We need enough rows to satisfy requested page from oldest-first view.
-        if len(all_messages) >= target_needed or not cursor:
             break
 
-    all_messages.sort(key=lambda m: float(str(m.get("ts") or "0") or "0"))
-    start = (page - 1) * count
-    end = start + count
-    page_messages = all_messages[start:end]
+        batch = list(reversed(data.get("messages", [])))
+        for root in batch:
+            root_ts = str(root.get("ts") or "")
+            if not root_ts or root_ts in seen:
+                continue
 
-    has_more = bool(end < len(all_messages) or upstream_has_more)
+            # Keep channel stream rooted: replies are expanded inline from their roots.
+            thread_ts = str(root.get("thread_ts") or "")
+            if thread_ts and thread_ts != root_ts:
+                continue
+
+            emitted.append(root)
+            seen.add(root_ts)
+            remaining -= 1
+            if remaining <= 0:
+                return emitted, remaining, True
+
+            if int(root.get("reply_count", 0) or 0) > 0:
+                thread_msgs, remaining = _emit_thread_after_cursor(
+                    channel_id,
+                    thread_ts or root_ts,
+                    root_ts,
+                    remaining,
+                    seen,
+                )
+                emitted.extend(thread_msgs)
+                if remaining <= 0:
+                    return emitted, remaining, True
+
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            exhausted = True
+            break
+
+    has_more = (remaining <= 0) or (not exhausted)
+    return emitted, remaining, has_more
+
+
+def _emit_latest_channel_with_threads(
+    channel_id: str,
+    remaining: int,
+    seen: set[str],
+) -> tuple[list[dict], int, bool]:
+    """Emit a bounded recent stream for channel-only reads (no cursor target)."""
+    emitted: list[dict] = []
+    cursor = None
+    exhausted = False
+    batch_limit = max(200, remaining)
+
+    while remaining > 0:
+        params = {
+            "channel": channel_id,
+            "limit": batch_limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        data = _post_api("conversations.history", params)
+        if not data.get("ok"):
+            break
+
+        for root in data.get("messages", []):
+            root_ts = str(root.get("ts") or "")
+            if not root_ts or root_ts in seen:
+                continue
+
+            thread_ts = str(root.get("thread_ts") or "")
+            if thread_ts and thread_ts != root_ts:
+                continue
+
+            emitted.append(root)
+            seen.add(root_ts)
+            remaining -= 1
+            if remaining <= 0:
+                return emitted, remaining, True
+
+            if int(root.get("reply_count", 0) or 0) > 0:
+                thread_msgs, remaining = _emit_thread_after_cursor(
+                    channel_id,
+                    thread_ts or root_ts,
+                    root_ts,
+                    remaining,
+                    seen,
+                )
+                emitted.extend(thread_msgs)
+                if remaining <= 0:
+                    return emitted, remaining, True
+
+        cursor = data.get("response_metadata", {}).get("next_cursor", "")
+        if not cursor:
+            exhausted = True
+            break
+
+    has_more = (remaining <= 0) or (not exhausted)
+    return emitted, remaining, has_more
+
+
+def _fetch_read_stream(
+    channel_id: str,
+    cursor_ts: str | None,
+    thread_hint_ts: str | None,
+    count: int,
+) -> dict:
+    """Fetch bounded inline root+thread stream using target timestamp as cursor.
+
+    Cursor semantics are strict-resume (exclusive): only messages after the
+    provided cursor message are emitted.
+    """
+    remaining = max(1, count)
+    seen: set[str] = set()
+    emitted: list[dict] = []
+
+    cursor_ts = _normalize_slack_ts(cursor_ts)
+    thread_hint_ts = _normalize_slack_ts(thread_hint_ts)
+
+    if not cursor_ts:
+        latest_msgs, _, has_more = _emit_latest_channel_with_threads(
+            channel_id,
+            remaining,
+            seen,
+        )
+        return {
+            "ok": True,
+            "messages": latest_msgs,
+            "has_more": bool(has_more),
+        }
+
+    # If cursor is inside a thread, continue remaining thread messages first.
+    root_resume_ts = cursor_ts
+    if cursor_ts:
+        thread_root_ts = thread_hint_ts
+        if not thread_root_ts:
+            msg = _find_exact_message(channel_id, cursor_ts)
+            if msg:
+                msg_thread_ts = _normalize_slack_ts(str(msg.get("thread_ts") or ""))
+                if msg_thread_ts:
+                    thread_root_ts = msg_thread_ts
+
+        if thread_root_ts:
+            thread_msgs, remaining = _emit_thread_after_cursor(
+                channel_id,
+                thread_root_ts,
+                cursor_ts,
+                remaining,
+                seen,
+            )
+            emitted.extend(thread_msgs)
+            root_resume_ts = thread_root_ts
+
+    if remaining > 0:
+        root_msgs, remaining, has_more = _emit_channel_with_threads_after_cursor(
+            channel_id,
+            root_resume_ts,
+            remaining,
+            seen,
+        )
+        emitted.extend(root_msgs)
+    else:
+        has_more = True
+
     return {
         "ok": True,
-        "messages": page_messages,
-        "has_more": has_more,
-        "response_metadata": {
-            "next_cursor": cursor or "",
-        },
-    }, page
+        "messages": emitted,
+        "has_more": bool(has_more),
+    }
+
+
+def _expand_channel_messages_with_threads(channel_id: str, messages: list[dict]) -> list[dict]:
+    """Inline thread replies immediately after root channel messages.
+
+    This preserves channel order while detouring into each thread body before
+    continuing with subsequent channel root messages.
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages
+
+    expanded: list[dict] = []
+    for msg in messages:
+        expanded.append(msg)
+
+        msg_ts = str(msg.get("ts") or "")
+        if not msg_ts:
+            continue
+
+        reply_count = int(msg.get("reply_count", 0) or 0)
+        if reply_count <= 0:
+            continue
+
+        thread_ts = str(msg.get("thread_ts") or msg_ts)
+        # Only expand from root thread parents in channel history.
+        if thread_ts != msg_ts:
+            continue
+
+        replies = _fetch_all_thread_replies(channel_id, thread_ts)
+        expanded.extend(replies)
+
+    return expanded
 
 
 def _print_read_text(
@@ -323,7 +665,6 @@ def _print_read_text(
     channel_id: str,
     thread_ts: str | None,
     count: int,
-    page: int,
     data: dict,
 ):
     """Print read output using the same style as search output."""
@@ -340,8 +681,6 @@ def _print_read_text(
     if total_estimate is not None:
         print(
             f"{_fg_rgb('pagination', 180, 190, 203)}: "
-            f"{_fg_rgb('page', 140, 153, 173)} {page} "
-            f"{_fg_rgb('|', 90, 98, 110)} "
             f"{_fg_rgb('per_page', 140, 153, 173)} {count} "
             f"{_fg_rgb('|', 90, 98, 110)} "
             f"{_fg_rgb('total_estimate', 140, 153, 173)} {total_estimate} "
@@ -351,8 +690,6 @@ def _print_read_text(
     else:
         print(
             f"{_fg_rgb('pagination', 180, 190, 203)}: "
-            f"{_fg_rgb('page', 140, 153, 173)} {page} "
-            f"{_fg_rgb('|', 90, 98, 110)} "
             f"{_fg_rgb('per_page', 140, 153, 173)} {count} "
             f"{_fg_rgb('|', 90, 98, 110)} "
             f"{_fg_rgb('returned', 140, 153, 173)} {len(messages)} "
@@ -370,7 +707,7 @@ def _print_read_text(
             event_id = format_event_id(channel_id, msg_ts, msg_thread_ts)
             channel_display = f"#{channel_name} ({event_id})"
             who = _display_user(client, msg)
-            text = _format_message_text(client, msg.get("text", ""), inline_user_cache)
+            text = _format_message_text(client, msg.get("text", ""), inline_user_cache, msg)
             print(
                 f"{_fg_rgb(channel_display, 66, 184, 131)} "
                 f"{_fg_rgb(who, 193, 145, 255)}"
@@ -569,7 +906,7 @@ def _print_around_text(
             prefix = "[target] " if msg_ts == target_ts else ""
             channel_display = f"{prefix}#{channel_name} ({event_id})"
             who = _display_user(client, msg)
-            text = _format_message_text(client, msg.get("text", ""), inline_user_cache)
+            text = _format_message_text(client, msg.get("text", ""), inline_user_cache, msg)
             print(
                 f"{_fg_rgb(channel_display, 66, 184, 131)} "
                 f"{_fg_rgb(who, 193, 145, 255)}"
@@ -1065,8 +1402,7 @@ def read_message(
         ...,
         help="Channel name/ID OR CHANNEL:TIMESTAMP OR CHANNEL:TIMESTAMP@THREAD_TS OR Slack permalink",
     ),
-    count: int = typer.Option(20, "--count", "-n", help="Results per page"),
-    page: int = typer.Option(1, "--page", "-p", help="Results page number"),
+    count: int = typer.Option(20, "--count", "-n", help="Maximum messages to emit"),
     before: int = typer.Option(None, "--before", "-B", help="Context messages before target timestamp"),
     after: int = typer.Option(None, "--after", "-A", help="Context messages after target timestamp"),
     yaml_output: bool = typer.Option(
@@ -1075,7 +1411,7 @@ def read_message(
         help="Output full YAML payload instead of compact text",
     ),
 ):
-    """Read channel messages, or thread replies when target includes @THREAD_TS."""
+    """Read a bounded inline channel/thread stream using target timestamp as cursor."""
     context = _build_target_context(target)
     resolved_channel_id = context["resolved_channel_id"]
     channel_name = context["channel_name"]
@@ -1107,6 +1443,7 @@ def read_message(
         )
 
         if yaml_output:
+            _warm_and_enrich_yaml_users(around_messages)
             output = {
                 "target": target,
                 "target_summary": target_summary,
@@ -1132,85 +1469,21 @@ def read_message(
         )
         return
 
-    # Thread mode: explicit thread context present.
-    if timestamp and thread_ts:
-        data, actual_page = _fetch_page(
-            "conversations.replies",
-            {"channel": resolved_channel_id, "ts": thread_ts},
-            count,
-            page,
-        )
-
-        if yaml_output:
-            output = {
-                **data,
-                "channel": channel_meta,
-            }
-            print(yaml.dump(output, indent=2, sort_keys=False))
-            return
-
-        if not data.get("ok"):
-            print(yaml.dump(data, indent=2, sort_keys=False))
-            return
-
-        display_data = {**data, "messages": data.get("messages", [])[:count]}
-        _print_read_text(
-            target_summary,
-            channel_name,
-            resolved_channel_id,
-            thread_ts,
-            count,
-            actual_page,
-            display_data,
-        )
-        return
-
-    # Channel mode anchored to timestamp without thread context.
-    if timestamp and not thread_ts:
-        data, actual_page = _fetch_channel_from_timestamp(
-            resolved_channel_id,
-            timestamp,
-            count,
-            page,
-        )
-
-        if yaml_output:
-            output = {
-                **data,
-                "channel": channel_meta,
-                "anchor_timestamp": timestamp,
-                "ordering": "chronological",
-            }
-            print(yaml.dump(output, indent=2, sort_keys=False))
-            return
-
-        if not data.get("ok"):
-            print(yaml.dump(data, indent=2, sort_keys=False))
-            return
-
-        _print_read_text(
-            target_summary,
-            channel_name,
-            resolved_channel_id,
-            None,
-            count,
-            actual_page,
-            data,
-        )
-        return
-
-    # Channel mode: channel name/ID, CHANNEL:TIMESTAMP, or non-thread permalink.
-    data, actual_page = _fetch_page(
-        "conversations.history",
-        {"channel": resolved_channel_id},
+    # Unified cursor stream mode.
+    data = _fetch_read_stream(
+        resolved_channel_id,
+        timestamp,
+        thread_ts,
         count,
-        page,
     )
 
     if yaml_output:
+        _warm_and_enrich_yaml_users(data.get("messages", []))
         output = {
             **data,
             "channel": channel_meta,
+            "cursor": timestamp,
+            "thread_cursor": thread_ts,
         }
         print(yaml.dump(output, indent=2, sort_keys=False))
         return
@@ -1223,9 +1496,8 @@ def read_message(
         target_summary,
         channel_name,
         resolved_channel_id,
-        None,
+        thread_ts,
         count,
-        actual_page,
         data,
     )
 

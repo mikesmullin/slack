@@ -89,16 +89,15 @@ Example:
 read-message
 
 Usage:
-    slack-chat read-message <target> [--count N] [--page N] [--before N] [--after N] [--yaml]
+    slack-chat read-message <target> [--count N] [--before N] [--after N] [--yaml]
 
 Description:
     Unified read command.
-    - Default mode: paginated channel/thread reads via --count/--page
+    - Default mode: bounded cursor reads using target timestamp as resume marker
     - Around mode: context windows around a message via --before/--after
 
 Options:
-    --count, -n   Results per page (default: 20)
-    --page, -p    1-based page index (default: 1)
+    --count, -n   Maximum messages to emit (default: 20)
     --before, -B  Context messages before target timestamp (around mode)
     --after, -A   Context messages after target timestamp (around mode)
     --yaml        Print raw YAML payload
@@ -106,8 +105,8 @@ Options:
 {TARGET_EXAMPLES}
 
 Examples:
-    slack-chat read-message C05R34P9KAA -n 20 -p 1
-    slack-chat read-message "CTXPNCU3T:1709253181.804579@1707924824.356449" -n 5 -p 1
+    slack-chat read-message C05R34P9KAA -n 20
+    slack-chat read-message "CTXPNCU3T:1709253181.804579@1707924824.356449" -n 5
     slack-chat read-message "CTXPNCU3T:1709253181.804579@1707924824.356449" -B 2 -A 3
 """.strip(),
         ("resolve",): f"""
