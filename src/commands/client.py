@@ -78,6 +78,19 @@ def _clean_text(text: str) -> str:
     return (text or "").replace("\n", " ").strip()
 
 
+def _normalize_markdown_links(text: str) -> str:
+    """Convert Markdown links to Slack mrkdwn links.
+
+    Slack API accepts `<url|label>` but does not consistently render
+    `[label](url)` in posted text.
+    """
+    if not text:
+        return text
+
+    pattern = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+    return pattern.sub(lambda m: f"<{m.group(2)}|{m.group(1)}>", text)
+
+
 def _normalize_slack_ts(ts: str | None) -> str | None:
     """Normalize Slack timestamps to float-string form seconds.micros.
 
@@ -923,6 +936,7 @@ def post_message(
     text: str = typer.Argument(..., help="Message text"),
 ):
     """Post a channel message, or reply to a thread when target includes thread context."""
+    normalized_text = _normalize_markdown_links(text)
     context = _build_target_context(target)
     channel_id = context["resolved_channel_id"]
     timestamp = context["timestamp"]
@@ -932,11 +946,11 @@ def post_message(
     if timestamp:
         params = {
             "channel": channel_id,
-            "text": text,
+            "text": normalized_text,
             "thread_ts": thread_ts or timestamp,
         }
     else:
-        params = {"channel": channel_id, "text": text}
+        params = {"channel": channel_id, "text": normalized_text}
 
     data = _post_api("chat.postMessage", params)
     print(f"{_fg_rgb('target', 250, 208, 44)}: {_fg_rgb(context['target_summary'], 214, 224, 255)}")
