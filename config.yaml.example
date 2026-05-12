@@ -1,6 +1,10 @@
 # Slack Watch Configuration
 # Copy this file to config.yaml and customize
 #
+# The Slack workspace URL to navigate to on server start.
+# Use your workspace's direct URL to avoid redirect hangs.
+slack_url: "https://yourworkspace.slack.com/"
+
 # Environment variables available in shell commands:
 #   $_BUFFER    - Path to buffer.json containing full message object
 #   $_CHANNEL   - Channel ID (e.g., C0A8JJBAVU2)
@@ -23,34 +27,34 @@ watch:
 
   # Example: Auto-reply with command output
   # The shell output is posted as a threaded reply
-  nexint:
-    - pattern: "^!ping"
-      reply: true
-      shell: "echo 'pong!'"
-
-    - pattern: "^!time"
-      reply: true
-      shell: "date '+%Y-%m-%d %H:%M:%S'"
-
-    - pattern: "^!joke"
-      reply: true
-      shell: "subd -t talker tell me a joke"
-  
-    - pattern: "^!subd "
-      reply: true
-      shell: "cat $_BUFFER | subd -i -t talker answer"
-  
-    - pattern: "^!jira "
-      reply: true
-      shell: "cat $_BUFFER | subd -i -t jira answer the user_message"
-
-    - pattern: "^!help"
-      reply: true
-      shell: |
-        echo "Available commands:"
-        echo "  !ping - Check if bot is alive"
-        echo "  !time - Get current time"
-        echo "  !help - Show this help"
+#  nexint:
+#    - pattern: "^!ping"
+#      reply: true
+#      shell: "echo 'pong!'"
+#
+#    - pattern: "^!time"
+#      reply: true
+#      shell: "date '+%Y-%m-%d %H:%M:%S'"
+#
+#    - pattern: "^!joke"
+#      reply: true
+#      shell: "subd -t talker tell me a joke"
+#  
+#    - pattern: "^!subd "
+#      reply: true
+#      shell: "cat $_BUFFER | subd -i -t talker answer"
+#  
+#    - pattern: "^!jira "
+#      reply: true
+#      shell: "cat $_BUFFER | subd -i -t jira answer the user_message"
+#
+#    - pattern: "^!help"
+#      reply: true
+#      shell: |
+#        echo "Available commands:"
+#        echo "  !ping - Check if bot is alive"
+#        echo "  !time - Get current time"
+#        echo "  !help - Show this help"
 
   # Watch by channel ID directly
   # C0A8JJBAVU2:

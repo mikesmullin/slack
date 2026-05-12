@@ -28,6 +28,20 @@ _watch_engine: Optional[WatchEngine] = None
 WORKSPACE_ROOT = Path(__file__).parent.parent
 DATA_DIR = WORKSPACE_ROOT / ".browser_data"
 PID_FILE = WORKSPACE_ROOT / "slack-server.pid"
+CONFIG_FILE = WORKSPACE_ROOT / "config.yaml"
+
+def _load_slack_url() -> str:
+    """Read slack_url from config.yaml, falling back to a sensible default."""
+    import yaml
+    try:
+        if CONFIG_FILE.exists():
+            data = yaml.safe_load(CONFIG_FILE.read_text()) or {}
+            url = data.get("slack_url")
+            if url:
+                return url
+    except Exception as e:
+        logger.warning(f"Could not read slack_url from config.yaml: {e}")
+    return "https://app.slack.com/"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -50,7 +64,8 @@ async def lifespan(app: FastAPI):
     # Navigate to Slack if not already there
     url = await session.get_current_page_url()
     if "slack.com" not in url:
-        await session.navigate_to("https://app.slack.com/client/")
+        slack_url = _load_slack_url()
+        await session.navigate_to(slack_url)
     
     # Initialize watch engine (loads config.yaml if present)
     await _init_watch_engine()
