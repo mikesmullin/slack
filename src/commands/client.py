@@ -21,6 +21,7 @@ from ..utils import (
     parse_event_id,
     parse_slack_permalink,
 )
+from .. import storage
 
 # Create Typer app for client commands
 app = typer.Typer(help="Slack client commands")
@@ -778,6 +779,35 @@ def _build_target_context(target: str) -> dict:
 
     timestamp = _normalize_slack_ts(timestamp)
     thread_ts = _normalize_slack_ts(thread_ts)
+
+    # If target looks like a user (ID or username), open a DM channel
+    _known_id = re.match(r"^[CDGUW][A-Z0-9]{6,}$", channel_id or "")
+    _user_id_pattern = re.match(r"^[UW][A-Z0-9]{6,}$", channel_id or "")
+    if channel_id and not _known_id:
+        # Treat as a username — search local user cache (offline)
+        name = channel_id.lstrip("@")
+        matches = storage.find_users_by_keyword(name)
+        # Prefer an exact match on name/real_name/display_name
+        user_id = None
+        for u in matches:
+            profile = u.get("profile") or {}
+            if (
+                u.get("name") == name
+                or u.get("real_name") == name
+                or profile.get("display_name") == name
+            ):
+                user_id = u.get("id")
+                break
+        if user_id is None and len(matches) == 1:
+            # Only one fuzzy match — use it
+            user_id = matches[0].get("id")
+        if user_id:
+            channel_id = user_id
+            _user_id_pattern = True
+    if channel_id and _user_id_pattern:
+        dm_data = _post_api("conversations.open", {"users": channel_id})
+        if dm_data.get("ok") and dm_data.get("channel"):
+            channel_id = dm_data["channel"]["id"]
 
     if timestamp and not thread_ts and channel_id:
         data = _post_api(

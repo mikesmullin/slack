@@ -2,6 +2,7 @@
 
 import typer
 import sys
+import json
 import yaml
 import re
 import os
@@ -621,6 +622,8 @@ def user_resolve(
                 )
                 if response.status_code == 200:
                     data = response.json()
+                    if isinstance(data, str):
+                        data = json.loads(data)
                     if data.get("ok"):
                         for user in data.get("members", []):
                             if (
