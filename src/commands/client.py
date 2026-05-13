@@ -575,11 +575,15 @@ def _fetch_read_stream(
     cursor_ts: str | None,
     thread_hint_ts: str | None,
     count: int,
+    thread_scoped: bool = False,
 ) -> dict:
     """Fetch bounded inline root+thread stream using target timestamp as cursor.
 
     Cursor semantics are strict-resume (exclusive): only messages after the
     provided cursor message are emitted.
+
+    When thread_scoped=True (user explicitly targeted a thread), the stream
+    stops at the end of that thread and never spills into channel history.
     """
     remaining = max(1, count)
     seen: set[str] = set()
@@ -602,6 +606,7 @@ def _fetch_read_stream(
 
     # If cursor is inside a thread, continue remaining thread messages first.
     root_resume_ts = cursor_ts
+    thread_root_ts = None
     if cursor_ts:
         thread_root_ts = thread_hint_ts
         if not thread_root_ts:
@@ -612,6 +617,17 @@ def _fetch_read_stream(
                     thread_root_ts = msg_thread_ts
 
         if thread_root_ts:
+            # When cursor IS the thread root (user targeted the root message itself),
+            # include the root message so the full thread is visible (root + replies).
+            if cursor_ts == thread_root_ts and remaining > 0:
+                root_msg = _find_exact_message(channel_id, thread_root_ts)
+                if root_msg:
+                    root_ts_val = str(root_msg.get("ts") or "")
+                    if root_ts_val and root_ts_val not in seen:
+                        emitted.append(root_msg)
+                        seen.add(root_ts_val)
+                        remaining -= 1
+
             thread_msgs, remaining = _emit_thread_after_cursor(
                 channel_id,
                 thread_root_ts,
@@ -621,6 +637,21 @@ def _fetch_read_stream(
             )
             emitted.extend(thread_msgs)
             root_resume_ts = thread_root_ts
+
+    # When the user explicitly targeted a thread, stop here — do not spill into
+    # channel history. Return a thread_end marker so the caller can tell the
+    # user where channel history resumes.
+    if thread_scoped and thread_root_ts:
+        # has_more means "there are more thread messages beyond count"
+        thread_exhausted = remaining > 0  # didn't hit the count limit inside thread
+        next_channel_ts = root_resume_ts  # channel resumes after thread root
+        return {
+            "ok": True,
+            "messages": emitted,
+            "has_more": not thread_exhausted,
+            "thread_end": True,
+            "next_channel_ts": next_channel_ts,
+        }
 
     if remaining > 0:
         root_msgs, remaining, has_more = _emit_channel_with_threads_after_cursor(
@@ -727,6 +758,12 @@ def _print_read_text(
                 f"{_fg_rgb(':', 140, 153, 173)} "
                 f"{text}"
             )
+
+    if data.get("thread_end"):
+        next_ts = data.get("next_channel_ts", "")
+        next_event_id = format_event_id(channel_id, next_ts) if next_ts else ""
+        note = f"(end of message thread. next message in channel resumes from: {next_event_id})" if next_event_id else "(end of message thread)"
+        print(_fg_rgb(note, 140, 153, 173))
 
 
 def _build_target_context(target: str) -> dict:
@@ -1532,11 +1569,15 @@ def read_message(
         return
 
     # Unified cursor stream mode.
+    # thread_scoped=True when the user explicitly targeted a thread (via @THREAD_TS
+    # or a permalink with ?thread_ts=). In that case the stream must not spill
+    # beyond the thread boundary into channel history.
     data = _fetch_read_stream(
         resolved_channel_id,
         timestamp,
         thread_ts,
         count,
+        thread_scoped=bool(thread_ts),
     )
 
     if yaml_output:

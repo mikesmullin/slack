@@ -35,7 +35,10 @@ def server_status():
     try:
         with get_client() as client:
             response = client.get(f"{SERVER_URL}/status")
-            data = response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
 
             status = "🟢 running" if is_running else "🔴 stopped"
             url = data.get("url", "N/A")
