@@ -348,6 +348,22 @@ slack-chat channel tab #example-team 1 --yaml
 - Purpose: find cached users by keyword.
 - Usage: `slack-chat user find <keyword>`
 
+### `slack-chat user status-get`
+- Purpose: get the current Slack status (emoji, text, expiry) for any user.
+- Usage: `slack-chat user status-get <identifier>`
+- `<identifier>` may be a user ID (`U...`), username, or `@mention`.
+- Example: `slack-chat user status-get aarredondo`
+
+### `slack-chat user status-set`
+- Purpose: set your own Slack status.
+- Usage: `slack-chat user status-set <text> [--emoji EMOJI] [--minutes N]`
+- Pass an empty string to clear the status.
+- `--emoji` / `-e`: status emoji (e.g. `:calendar:`)
+- `--minutes` / `-m`: expiry in minutes from now; 0 means no expiry
+- Examples:
+  - `slack-chat user status-set "In a meeting" --emoji :calendar: --minutes 60`
+  - `slack-chat user status-set ""` (clears status)
+
 ## Agent Guidance
 
 1. Prefer `resolve` before reasoning about ambiguous inputs.

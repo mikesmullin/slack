@@ -465,9 +465,11 @@ Usage:
     slack-chat user <subcommand>
 
 Subcommands:
-    resolve   Resolve user ID/name
-    list      List cached users
-    find      Find cached users
+    resolve      Resolve user ID/name
+    list         List cached users
+    find         Find cached users
+    status-get   Get current status for a user
+    status-set   Set your own status
 """.strip(),
         ("user", "resolve"): """
 user resolve
@@ -506,6 +508,38 @@ Description:
 Examples:
     slack-chat user find jdoe
     slack-chat user find "site reliability"
+""".strip(),
+        ("user", "status-get"): """
+user status-get
+
+Usage:
+    slack-chat user status-get <identifier>
+
+Description:
+    Get the current Slack status for any user.
+    <identifier> may be a user ID (U...), username, or @mention.
+
+Examples:
+    slack-chat user status-get aarredondo
+    slack-chat user status-get U01LZPPTXEU
+""".strip(),
+        ("user", "status-set"): """
+user status-set
+
+Usage:
+    slack-chat user status-set <text> [--emoji EMOJI] [--minutes N]
+
+Description:
+    Set your own Slack status. Pass an empty string to clear.
+
+Options:
+    --emoji, -e   Status emoji (e.g. :calendar:)
+    --minutes, -m Expiry in minutes from now (0 = no expiry)
+
+Examples:
+    slack-chat user status-set "In a meeting" --emoji :calendar: --minutes 60
+    slack-chat user status-set "Focusing" --emoji :headphones:
+    slack-chat user status-set ""
 """.strip(),
         ("pull",): """
 pull

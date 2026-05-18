@@ -734,3 +734,100 @@ def user_find(
         project = profile.get("fields", {}).get("XfHJKR6MPT", {}).get("value", "")
         print(f"{user_id}\t{name}\t{title}\t{project}")
 
+
+@user_app.command("status-get")
+def user_status_get(
+    identifier: str = typer.Argument(
+        ..., help="User ID (U123...), username, or @mention"
+    ),
+):
+    """Get the current Slack status for a user."""
+    identifier = identifier.lstrip("@")
+
+    # Resolve to user ID if it's a name
+    user_id = None
+    if re.match(r"^[UW][A-Z0-9]{6,}$", identifier):
+        user_id = identifier
+    else:
+        matches = storage.find_users_by_keyword(identifier)
+        for u in matches:
+            prof = u.get("profile") or {}
+            if (
+                u.get("name") == identifier
+                or u.get("real_name") == identifier
+                or prof.get("display_name") == identifier
+            ):
+                user_id = u.get("id")
+                break
+        if user_id is None and len(matches) == 1:
+            user_id = matches[0].get("id")
+
+    if user_id is None:
+        print(f"error: could not resolve user '{identifier}'", file=sys.stderr)
+        sys.exit(1)
+
+    with get_client() as client:
+        data = call_api(client, "users.profile.get", {"user": user_id})
+
+    if not data.get("ok"):
+        print(f"error: {data.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+    prof = data.get("profile", {})
+    expiration = prof.get("status_expiration", 0)
+    output = {
+        "user_id": user_id,
+        "status_emoji": prof.get("status_emoji", ""),
+        "status_text": prof.get("status_text", ""),
+        "status_expiration": None,
+    }
+    if expiration:
+        from datetime import datetime, timezone
+        output["status_expiration"] = datetime.fromtimestamp(expiration, tz=timezone.utc).isoformat()
+
+    print(yaml.dump(output, indent=2, sort_keys=False, allow_unicode=True))
+
+
+@user_app.command("status-set")
+def user_status_set(
+    text: str = typer.Argument(..., help="Status text (empty string to clear)"),
+    emoji: str = typer.Option("", "--emoji", "-e", help="Status emoji, e.g. :calendar:"),
+    minutes: int = typer.Option(0, "--minutes", "-m", help="Expiry in minutes from now (0 = no expiry)"),
+):
+    """Set your own Slack status.
+
+    Examples:
+
+        slack-chat user status-set "In a meeting" --emoji :calendar: --minutes 60
+
+        slack-chat user status-set ""
+    """
+    import time as _time
+    expiration = int(_time.time()) + minutes * 60 if minutes > 0 else 0
+
+    with get_client() as client:
+        data = call_api(client, "users.profile.set", {
+            "profile": {
+                "status_text": text,
+                "status_emoji": emoji,
+                "status_expiration": expiration,
+            }
+        })
+
+    if not data.get("ok"):
+        print(f"error: {data.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+    result_profile = data.get("profile", {})
+    output = {
+        "ok": True,
+        "status_emoji": result_profile.get("status_emoji", emoji),
+        "status_text": result_profile.get("status_text", text),
+        "status_expiration": None,
+    }
+    if expiration:
+        from datetime import datetime, timezone
+        output["status_expiration"] = datetime.fromtimestamp(expiration, tz=timezone.utc).isoformat()
+
+    print(yaml.dump(output, indent=2, sort_keys=False, allow_unicode=True))
+
