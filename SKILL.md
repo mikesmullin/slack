@@ -85,6 +85,8 @@ The unified target parser (used by `resolve`, `read-message`, `post-message`) ac
   - `resolve`
   - `list`
   - `find`
+  - `status-get`
+  - `status-set`
 
 ## Command Reference
 
@@ -304,7 +306,9 @@ slack-chat inbox list [--type TYPE] [--limit N] [--since DATE] [--all] [--online
 
 ### `slack-chat channel tab`
 - Purpose: fetch one channel tab body/content via authenticated browser server proxy.
-- Usage: `slack-chat channel tab <channel> <tab> [--download] [--yaml]`
+- Usage:
+  - `slack-chat channel tab <channel> <tab> [--download] [--navigation-fallback] [--yaml]`
+  - `slack-chat channel tab <url> [--navigation-fallback] [--yaml]`
 - `tab` selector accepts:
   - 1-based index (for example `1`)
   - tab name (for example `Project Notes`)
