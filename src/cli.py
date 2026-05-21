@@ -113,11 +113,16 @@ Examples:
 resolve
 
 Usage:
-    slack-chat resolve <target>
+    slack-chat resolve <target> [--refresh]
 
 Description:
     Resolve a target into parsed components and resolved names.
     Uses cache first. If API fallback is needed and succeeds, cache is updated.
+    Use --refresh to bypass the cache and force a fresh API lookup (e.g. after
+    a channel is renamed).
+
+Options:
+    --refresh, -r   Bypass cache and force fresh API lookup
 
 {TARGET_EXAMPLES}
 
@@ -126,6 +131,7 @@ Examples:
     slack-chat resolve #sre-team
     slack-chat resolve U01DT37Q5LG
     slack-chat resolve "CTXPNCU3T:1709253181.804579@1707924824.356449"
+    slack-chat resolve C072X6XNZ88 --refresh
 """.strip(),
         ("post-message",): f"""
 post-message

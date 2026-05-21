@@ -189,13 +189,16 @@ pagination: per_page 5 | returned 5 | has_more true
 
 ### `slack-chat resolve`
 - Purpose: resolve any supported target into parsed components and names.
-- Usage: `slack-chat resolve <target>`
+- Usage: `slack-chat resolve <target> [--refresh]`
+- Options:
+  - `--refresh / -r`: bypass the local cache and force a fresh API lookup; re-caches the result. Use when a channel has been renamed or a user's display name has changed.
 - Examples:
 ```bash
 slack-chat resolve @jdoe
 slack-chat resolve #sre-team
 slack-chat resolve U01ABCDEF2
 slack-chat resolve "C01ABCDEF2:1709253181.804579@1707924824.356449"
+slack-chat resolve C01ABCDEF2 --refresh
 ```
 - Stdout pattern:
 ```text
@@ -207,6 +210,7 @@ resolved_id: U01ABCDEF2
 id_prefix_type: user
 ```
 - Colorized output is enabled on TTY unless `NO_COLOR=1`.
+- After a successful `--refresh`, the cache is updated, so subsequent `channel find` / `channel list` also reflect the new name.
 
 ### `slack-chat post-message`
 - Purpose: unified post command (channel post or thread reply from target context).

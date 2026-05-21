@@ -207,6 +207,9 @@ def resolve_target(
         ...,
         help="Name, ID, CHANNEL:TIMESTAMP, CHANNEL:TIMESTAMP@THREAD_TS, or Slack permalink URL",
     ),
+    refresh: bool = typer.Option(
+        False, "--refresh", "-r", help="Bypass cache and force fresh API lookup"
+    ),
 ):
     """Resolve a generic Slack target into IDs, names, and message components."""
     target = target.strip()
@@ -238,6 +241,8 @@ def resolve_target(
         )
 
         with get_client() as client:
+            if refresh:
+                storage.evict_cached_channel(channel_id)
             channel_name, _ = get_channel_name_by_id(client, channel_id)
             output["channel_name"] = channel_name
 
@@ -259,6 +264,8 @@ def resolve_target(
         )
 
         with get_client() as client:
+            if refresh:
+                storage.evict_cached_channel(channel_id)
             channel_name, _ = get_channel_name_by_id(client, channel_id)
             output["channel_name"] = channel_name
 
@@ -279,11 +286,15 @@ def resolve_target(
 
         with get_client() as client:
             if normalized[0] in {"C", "G", "D"}:
+                if refresh:
+                    storage.evict_cached_channel(normalized)
                 channel_name, channel_data = get_channel_name_by_id(client, normalized)
                 output["resolved_name"] = channel_name
                 output["resolved_kind"] = "channel"
                 output["is_private"] = channel_data.get("is_private", False)
             elif normalized[0] in {"U", "W", "B"}:
+                if refresh:
+                    storage.evict_cached_user(normalized)
                 user_name, user_data = get_user_name_by_id(client, normalized)
                 output["resolved_name"] = user_name
                 output["resolved_kind"] = "user"

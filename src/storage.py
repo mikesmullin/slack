@@ -362,6 +362,26 @@ def get_cached_channel(channel_id: str) -> Optional[Dict[str, Any]]:
     return cache.get(channel_id)
 
 
+def evict_cached_channel(channel_id: str) -> bool:
+    """Remove a channel entry from cache. Returns True if it was present."""
+    cache = _load_cache(CHANNELS_CACHE_FILE)
+    if channel_id in cache:
+        del cache[channel_id]
+        _save_cache(CHANNELS_CACHE_FILE, cache)
+        return True
+    return False
+
+
+def evict_cached_user(user_id: str) -> bool:
+    """Remove a user entry from cache. Returns True if it was present."""
+    cache = _load_cache(USERS_CACHE_FILE)
+    if user_id in cache:
+        del cache[user_id]
+        _save_cache(USERS_CACHE_FILE, cache)
+        return True
+    return False
+
+
 def cache_channel(channel_id: str, channel_data: Dict[str, Any]):
     """Cache channel info from API response."""
     cache = _load_cache(CHANNELS_CACHE_FILE)
