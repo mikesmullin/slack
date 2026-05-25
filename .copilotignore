@@ -1,0 +1,5 @@
+.tokens.yaml
+.browser_data/
+storage/
+buffer.json
+.env

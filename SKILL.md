@@ -11,7 +11,7 @@ description: communicate via slack-chat channels and direct messages with users
 
 It supports two operational modes:
 1. Local/offline workflows backed by `storage/` markdown and cache files.
-2. Remote/API workflows through the browser-backed server.
+2. Remote/API workflows that call the Slack API directly using credentials in `.tokens.yaml`.
 
 This doc is the operational usage reference for agents:
 - command invocations
@@ -19,6 +19,29 @@ This doc is the operational usage reference for agents:
 - stdout format examples
 
 All examples below are anonymized (`@jdoe`, `#sre-team`, placeholder IDs/URLs).
+
+## Authentication — `.tokens.yaml`
+
+Remote API commands require a `.tokens.yaml` file in the workspace root. It is populated automatically when `server start` runs and the browser navigates to an authenticated Slack workspace.
+
+```yaml
+token: xoxc-...        # xoxc- client token extracted from browser localStorage
+cookie: ...            # Slack 'd' session cookie (HttpOnly, extracted via CDP)
+workspace_url: https://org.enterprise.slack.com  # from auth.test
+is_enterprise: true    # true for enterprise grid workspaces
+```
+
+**Credential extraction flow:**
+1. `server start` opens a Chromium browser via browser-use.
+2. If already authenticated (persistent profile in `.browser_data/`), credentials are extracted immediately.
+3. If not authenticated, log in to Slack in the browser window, then run `server refresh-session`.
+4. The `d` cookie is extracted via CDP `Storage.getCookies` (not `document.cookie`) so HttpOnly cookies are captured.
+5. `workspace_url` and `is_enterprise` are resolved via a direct `auth.test` call.
+
+**Refreshing credentials:**
+- Credentials persist until the Slack session expires (typically days/weeks).
+- If API calls return auth errors, run `slack-chat server refresh-session` (browser must be running).
+- The browser can be stopped after credentials are saved — it is not required for subsequent API calls.
 
 ## Core IDs and Targets
 
@@ -69,11 +92,13 @@ The unified target parser (used by `resolve`, `read-message`, `post-message`) ac
   - `stop`
   - `navigate`
   - `reload`
+  - `refresh-session`
 - `search`
 - `read-message`
 - `resolve`
 - `post-message`
 - `post-reaction`
+- `api`
 - `channel`
   - `describe`
   - `tab`
@@ -147,6 +172,53 @@ ok: true
 channel: C01ABCDEF2
 muted: true
 ```
+
+### `slack-chat activity`
+- Purpose: show activity feed — mentions, thread replies, reactions.
+- Requires `.tokens.yaml` (no browser dependency at call time).
+- Usage: `slack-chat activity [--tab TAB] [--limit N] [--after EVENT_ID] [--yaml]`
+- Options:
+  - `--tab` / `-t`: `all` (default), `mentions`, `threads`, `reactions`
+  - `--limit` / `-n`: max items to fetch from API (default 25)
+  - `--after` / `-a`: only show items newer than this event ID or raw timestamp; accepts `CHANNEL:TS`, `CHANNEL:TS@THREAD_TS`, or a plain float timestamp string
+  - `--yaml`: dump raw YAML payload
+- Pagination: use the event ID printed at the end of any header line as `--after` to resume from that point.
+- Example:
+```bash
+slack-chat activity --tab mentions -n 10
+slack-chat activity --tab reactions
+slack-chat activity --tab threads --yaml
+slack-chat activity -n 50 --after C01ABCDEF2:1709253181.804579
+```
+- Stdout pattern (one item shown):
+```
+[thread] [unread]  2d ago  #sre-team (C01ABCDEF2)  @Jane Doe (U01ABCDEF2)  C01ABCDEF2:1709253181.804579@1707924824.356449:
+  message body line 1
+  message body line 2
+```
+- Badge types: `[mention]`, `[thread]`, `[reaction]`, plus optional `[unread]`
+- Age shown as `Nm ago`, `Nh ago`, or `Nd ago`
+- Channel displayed as `#name (ID)` or `Group DM: (@Name (UID), ...) (ID)` for MPDMs
+- Event ID at end of header is light-blue, terminated with `:`, usable directly as `--after` value
+
+### `slack-chat api`
+- Purpose: call any Slack API endpoint directly using saved credentials.
+- Requires `.tokens.yaml`.
+- Usage: `slack-chat api <endpoint> [--params JSON] [--data JSON] [--method GET|POST] [--yaml]`
+- Options:
+  - `--params` / `-p`: JSON object of query/form parameters
+  - `--data` / `-d`: additional JSON POST body parameters (merged with `--params`)
+  - `--method` / `-X`: `POST` (default) or `GET`
+  - `--yaml`: output as YAML instead of JSON
+- Examples:
+```bash
+slack-chat api auth.test
+slack-chat api users.list --params '{"limit": 10}'
+slack-chat api chat.postMessage --data '{"channel":"C01ABCDEF2","text":"Hello"}'
+slack-chat api conversations.list --method GET --params '{"limit": 5}'
+slack-chat api users.list --params '{"limit": 3}' --yaml
+```
+- Output: pretty-printed JSON (or YAML with `--yaml`); the raw API response object.
 
 ### `slack-chat search`
 - Purpose: search remote messages.
@@ -263,6 +335,20 @@ emoji: thumbsup
 ### `slack-chat server reload`
 - Purpose: reload watch/config without restart.
 
+### `slack-chat server refresh-session`
+- Purpose: re-extract token and `d` cookie from the open browser and update `.tokens.yaml`.
+- Run this after logging in to Slack if the server started before authentication completed, or when API calls start returning auth errors.
+- The browser server must be running.
+- Example: `slack-chat server refresh-session`
+- Stdout pattern:
+```text
+✅ Session credentials refreshed
+   Token:        xoxc-598587...
+   Cookie:       ✅
+   Workspace:    https://org.enterprise.slack.com
+   Enterprise:   True
+```
+
 ## `inbox` Subcommands
 
 ### `slack-chat inbox summary`
@@ -378,3 +464,5 @@ slack-chat channel tab #example-team 1 --yaml
 2. For reading conversation context, prefer `read-message` command.
 3. Use `--yaml` only when raw payload is required; prefer default compact output for context-window efficiency.
 4. For threaded analysis, preserve event IDs in outputs to keep direct referential follow-up possible.
+5. Remote API commands work without the browser server running, as long as `.tokens.yaml` exists and is not expired.
+6. If a remote command fails with an auth error, run `slack-chat server refresh-session` (requires browser server running) to renew credentials, then retry.

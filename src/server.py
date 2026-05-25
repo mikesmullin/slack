@@ -29,6 +29,7 @@ WORKSPACE_ROOT = Path(__file__).parent.parent
 DATA_DIR = WORKSPACE_ROOT / ".browser_data"
 PID_FILE = WORKSPACE_ROOT / "slack-server.pid"
 CONFIG_FILE = WORKSPACE_ROOT / "config.yaml"
+TOKENS_FILE = WORKSPACE_ROOT / ".tokens.yaml"
 
 def _load_slack_url() -> str:
     """Read slack_url from config.yaml, falling back to a sensible default."""
@@ -42,6 +43,118 @@ def _load_slack_url() -> str:
     except Exception as e:
         logger.warning(f"Could not read slack_url from config.yaml: {e}")
     return "https://app.slack.com/"
+
+
+async def extract_and_save_session() -> bool:
+    """Extract token and 'd' cookie from the browser and save to .tokens.yaml.
+
+    Should be called after the browser is on an authenticated Slack page.
+    Returns True if credentials were successfully extracted and saved.
+    """
+    import yaml
+
+    global intercepted_token, session
+    if not session:
+        return False
+
+    try:
+        page = await session.get_current_page()
+
+        # Extract token from localStorage
+        token_script = """() => {
+            try {
+                const config = JSON.parse(localStorage.localConfig_v2);
+                const teamId = document.location.pathname.match(/^\\/client\\/([A-Z0-9]+)/)[1];
+                return config.teams[teamId].token;
+            } catch(e) {
+                // Fallback: first available team token
+                try {
+                    const config = JSON.parse(localStorage.localConfig_v2);
+                    const teams = config.teams || {};
+                    const first = Object.values(teams)[0];
+                    return first ? first.token : null;
+                } catch(e2) { return null; }
+            }
+        }"""
+        token = await page.evaluate(token_script)
+
+        if not token or not isinstance(token, str) or not token.startswith("xox"):
+            logger.warning("Could not extract token from localStorage")
+            return False
+
+        intercepted_token = token
+
+        # Extract 'd' cookie via CDP Storage.getCookies — this returns HttpOnly
+        # cookies (like Slack's 'd' session cookie) that are invisible to JS.
+        d_cookie = None
+        try:
+            all_cookies = await session.cookies()
+            for cookie in all_cookies:
+                # CDP Cookie objects may be dicts or dataclass-like objects
+                name = cookie.get("name") if isinstance(cookie, dict) else getattr(cookie, "name", None)
+                value = cookie.get("value") if isinstance(cookie, dict) else getattr(cookie, "value", None)
+                if name == "d":
+                    d_cookie = value
+                    break
+        except Exception as e:
+            logger.warning(f"Could not extract cookies via CDP: {e}")
+
+        if not d_cookie:
+            logger.warning("Could not extract 'd' cookie — direct API calls will be limited")
+
+        # Get workspace URL and enterprise status via a direct httpx call to
+        # auth.test using the token + d cookie we just extracted.
+        workspace_url = None
+        is_enterprise_ws = False
+        try:
+            import httpx as _httpx
+            headers = {"Authorization": f"Bearer {token}"}
+            if d_cookie:
+                headers["Cookie"] = f"d={d_cookie}"
+            with _httpx.Client(timeout=10.0) as _client:
+                r = _client.post("https://slack.com/api/auth.test", headers=headers, data={"token": token})
+                auth_result = r.json()
+            if auth_result.get("ok"):
+                workspace_url = auth_result.get("url", "").rstrip("/") or None
+                is_enterprise_ws = (
+                    auth_result.get("enterprise_id") is not None
+                    or bool(workspace_url and "enterprise.slack.com" in workspace_url)
+                )
+                logger.info(f"auth.test workspace_url={workspace_url} enterprise={is_enterprise_ws}")
+        except Exception as e:
+            logger.warning(f"auth.test via httpx failed: {e}")
+
+        # Fallback: parse workspace URL from current page URL
+        if not workspace_url:
+            try:
+                current_url = await session.get_current_page_url()
+                import re as _re
+                m = _re.match(r'(https://[^/]+slack\.com)', current_url)
+                if m:
+                    workspace_url = m.group(1)
+                    is_enterprise_ws = "enterprise.slack.com" in workspace_url
+            except Exception as e:
+                logger.warning(f"Could not determine workspace URL from page URL: {e}")
+
+        # Write .tokens.yaml
+        data = {
+            "token": token,
+            "cookie": d_cookie,
+            "workspace_url": workspace_url,
+            "is_enterprise": is_enterprise_ws,
+        }
+        TOKENS_FILE.write_text(yaml.dump(data, default_flow_style=False))
+        TOKENS_FILE.chmod(0o600)
+
+        logger.info(
+            f"✅ Session credentials saved to .tokens.yaml "
+            f"(enterprise={is_enterprise_ws}, cookie={'yes' if d_cookie else 'no'})"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"extract_and_save_session failed: {e}")
+        return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,7 +179,12 @@ async def lifespan(app: FastAPI):
     if "slack.com" not in url:
         slack_url = _load_slack_url()
         await session.navigate_to(slack_url)
-    
+
+    # Try to extract and save session credentials immediately.
+    # This may fail if the user hasn't logged in yet; the /refresh-session
+    # endpoint can be called later once the page is fully authenticated.
+    await extract_and_save_session()
+
     # Initialize watch engine (loads config.yaml if present)
     await _init_watch_engine()
     
@@ -148,10 +266,32 @@ async def get_status():
             "has_token": intercepted_token is not None,
             "token_preview": intercepted_token[:10] + "..." if intercepted_token else None,
             "has_persistence": has_persistence,
+            "tokens_file": TOKENS_FILE.exists(),
             "ready": True
         }
     except Exception as e:
         return {"ready": False, "error": str(e), "authenticated": False}
+
+
+@app.post("/refresh-session")
+async def refresh_session():
+    """Re-extract token and cookie from the browser and update .tokens.yaml.
+
+    Call this after logging in if the server started before authentication
+    completed, or whenever you want to refresh stored credentials.
+    """
+    success = await extract_and_save_session()
+    if success:
+        import yaml
+        data = yaml.safe_load(TOKENS_FILE.read_text()) if TOKENS_FILE.exists() else {}
+        return {
+            "ok": True,
+            "token_preview": (data.get("token") or "")[:10] + "..." if data.get("token") else None,
+            "has_cookie": bool(data.get("cookie")),
+            "workspace_url": data.get("workspace_url"),
+            "is_enterprise": data.get("is_enterprise"),
+        }
+    return {"ok": False, "error": "Could not extract credentials — ensure you are logged in to Slack"}
 
 @app.get("/enterprise-check")
 async def check_enterprise():

@@ -4,7 +4,7 @@ import sys
 import typer
 
 # Import command modules
-from .commands import server, client, inbox, resolve, write
+from .commands import server, client, inbox, resolve, write, activity, api
 
 TARGET_EXAMPLES = """
 Valid target values:
@@ -47,11 +47,13 @@ REMOTE commands (direct remote/API operations):
     server stop          Stop browser server
     server navigate      Navigate browser to URL
     server reload        Reload config.yaml
+    activity             Show activity feed — mentions, threads, reactions
     search               Search messages
     read-message         Read messages, threads, or around-context windows
     resolve              Resolve names/IDs/events/URLs into components
     post-message         Post a message or thread reply
     post-reaction        Add reaction to a message
+    api                  Call any Slack API endpoint directly
     channel list         List cached channels
     channel find         Find cached channels
     channel describe     Describe a channel
@@ -169,11 +171,12 @@ Usage:
     slack-chat server <subcommand>
 
 Subcommands:
-    status      Show server status
-    start       Start server
-    stop        Stop server
-    navigate    Navigate browser to URL
-    reload      Reload config.yaml
+    status            Show server status
+    start             Start server
+    stop              Stop server
+    navigate          Navigate browser to URL
+    reload            Reload config.yaml
+    refresh-session   Re-extract token/cookie and update .tokens.yaml
 
 Examples:
     slack-chat server status
@@ -242,6 +245,21 @@ Description:
 
 Example:
     slack-chat server reload
+""".strip(),
+        ("server", "refresh-session"): """
+server refresh-session
+
+Usage:
+    slack-chat server refresh-session
+
+Description:
+    Re-extract the Slack token and 'd' cookie from the open browser window
+    and write them to .tokens.yaml.  Run this after logging in to Slack if
+    the server started before authentication completed, or whenever you need
+    to refresh stored credentials.  The browser must be running.
+
+Example:
+    slack-chat server refresh-session
 """.strip(),
         ("inbox",): """
 inbox
@@ -598,6 +616,29 @@ Description:
 Example:
     slack-chat mute C05R34P9KAA
 """.strip(),
+        ("activity",): """
+activity
+
+Usage:
+    slack-chat activity [--tab TAB] [--limit N] [--yaml]
+
+Description:
+    Show your Slack activity feed — mentions, thread replies, and reactions.
+    Calls the undocumented activity.feed API directly (no browser required).
+    Requires valid credentials in .tokens.yaml.
+
+Options:
+    --tab, -t    Which tab to show (default: all)
+                 all | mentions | threads | reactions
+    --limit, -n  Max items to return (default: 25)
+    --yaml       Print raw YAML payload
+
+Examples:
+    slack-chat activity
+    slack-chat activity --tab mentions
+    slack-chat activity --tab threads -n 10
+    slack-chat activity --tab reactions
+""".strip(),
 }
 
 
@@ -608,6 +649,7 @@ HELP_TREE = {
                 "stop": {},
                 "navigate": {},
                 "reload": {},
+                "refresh-session": {},
         },
         "inbox": {
                 "summary": {},
@@ -641,6 +683,7 @@ HELP_TREE = {
         "reply": {},
         "react": {},
         "mute": {},
+        "activity": {},
 }
 
 
@@ -691,6 +734,8 @@ typer_app.command("pull")(write.pull_command)
 typer_app.command("reply")(write.reply_command)
 typer_app.command("react")(write.react_command)
 typer_app.command("mute")(write.mute_command)
+typer_app.command("activity")(activity.activity_command)
+typer_app.command("api")(api.api_command)
 typer_app.command("search")(client.search_messages)
 typer_app.command("post-message")(client.post_message)
 typer_app.command("post-reaction")(client.add_reaction)

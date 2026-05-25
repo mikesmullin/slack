@@ -12,6 +12,7 @@ from ..utils import (
     SERVER_URL,
     PID_FILE,
     LOG_FILE,
+    TOKENS_FILE,
 )
 
 # Create Typer app for server commands
@@ -43,10 +44,12 @@ def server_status():
             status = "🟢 running" if is_running else "🔴 stopped"
             url = data.get("url", "N/A")
             has_token = "✅" if data.get("has_token") else "❌"
+            tokens_file = "✅ saved" if data.get("tokens_file") else "❌ not saved"
 
             print(f"Server: {status} (PID {pid})" if pid else f"Server: {status}")
             print(f"URL: {url}")
-            print(f"Token: {has_token}")
+            print(f"Token (browser): {has_token}")
+            print(f"Tokens file:     {tokens_file}")
     except httpx.ConnectError:
         if is_running:
             print(f"Server: 🟡 starting (PID {pid})")
@@ -188,6 +191,38 @@ def server_reload():
                     print(f"   (Server logs may have more details)")
             else:
                 print(f"❌ Failed to reload: {response.text}", file=sys.stderr)
+                sys.exit(1)
+    except httpx.ConnectError:
+        print("❌ Server is not running.", file=sys.stderr)
+        sys.exit(1)
+
+
+@app.command("refresh-session")
+def server_refresh_session():
+    """Re-extract token and cookie from the browser and update .tokens.yaml.
+
+    Run this after logging in to Slack if the server started before you
+    were authenticated, or whenever you want to refresh stored credentials.
+    """
+    import httpx
+
+    try:
+        with get_client() as client:
+            response = client.post(f"{SERVER_URL}/refresh-session", timeout=30.0)
+            if response.status_code == 200:
+                data = response.json()
+                if data.get("ok"):
+                    print("✅ Session credentials refreshed")
+                    print(f"   Token:        {data.get('token_preview', 'n/a')}")
+                    print(f"   Cookie:       {'✅' if data.get('has_cookie') else '❌'}")
+                    print(f"   Workspace:    {data.get('workspace_url', 'n/a')}")
+                    print(f"   Enterprise:   {data.get('is_enterprise', False)}")
+                else:
+                    print(f"❌ {data.get('error', 'Refresh failed')}", file=sys.stderr)
+                    print("   Make sure you are logged in to Slack in the browser window.")
+                    sys.exit(1)
+            else:
+                print(f"❌ Server error: {response.text}", file=sys.stderr)
                 sys.exit(1)
     except httpx.ConnectError:
         print("❌ Server is not running.", file=sys.stderr)

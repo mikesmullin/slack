@@ -1,6 +1,7 @@
 slack-server.pid
 slack-server.log
 config.yaml
+.tokens.yaml
 /storage/
 node_modules/
 storage/.session-cache.json
