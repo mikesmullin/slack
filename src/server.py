@@ -15,6 +15,7 @@ from browser_use import Browser
 from contextlib import asynccontextmanager
 
 from .watch import WatchEngine, set_watch_engine, get_watch_engine
+from .signals import SignalEngine
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 session: Optional[Browser] = None
 intercepted_token: Optional[str] = None
 _watch_engine: Optional[WatchEngine] = None
+_signal_engine: Optional[SignalEngine] = None
 
 WORKSPACE_ROOT = Path(__file__).parent.parent
 DATA_DIR = WORKSPACE_ROOT / ".browser_data"
@@ -106,6 +108,7 @@ async def extract_and_save_session() -> bool:
         # auth.test using the token + d cookie we just extracted.
         workspace_url = None
         is_enterprise_ws = False
+        enterprise_id_from_auth = ""
         try:
             import httpx as _httpx
             headers = {"Authorization": f"Bearer {token}"}
@@ -116,6 +119,11 @@ async def extract_and_save_session() -> bool:
                 auth_result = r.json()
             if auth_result.get("ok"):
                 workspace_url = auth_result.get("url", "").rstrip("/") or None
+                enterprise_id_from_auth = (
+                    auth_result.get("enterprise_id")
+                    or auth_result.get("team_id")
+                    or ""
+                )
                 is_enterprise_ws = (
                     auth_result.get("enterprise_id") is not None
                     or bool(workspace_url and "enterprise.slack.com" in workspace_url)
@@ -136,12 +144,20 @@ async def extract_and_save_session() -> bool:
             except Exception as e:
                 logger.warning(f"Could not determine workspace URL from page URL: {e}")
 
-        # Write .tokens.yaml
+        # Write .tokens.yaml — preserve any previously cached fields (e.g. gateway_server)
+        existing = {}
+        if TOKENS_FILE.exists():
+            try:
+                existing = yaml.safe_load(TOKENS_FILE.read_text()) or {}
+            except Exception:
+                pass
         data = {
+            **existing,
             "token": token,
             "cookie": d_cookie,
             "workspace_url": workspace_url,
             "is_enterprise": is_enterprise_ws,
+            "enterprise_id": enterprise_id_from_auth or existing.get("enterprise_id", ""),
         }
         TOKENS_FILE.write_text(yaml.dump(data, default_flow_style=False))
         TOKENS_FILE.chmod(0o600)
@@ -872,6 +888,13 @@ async def _start_websocket_monitoring() -> bool:
                             loop.create_task(_watch_engine.process_message(payload))
                         except Exception as we:
                             logger.error(f"Watch engine error: {we}")
+
+                    # Dispatch to signal engine (independent of watch)
+                    if isinstance(payload, dict) and _signal_engine:
+                        try:
+                            _signal_engine.dispatch(payload)
+                        except Exception as se:
+                            logger.error(f"Signal engine error: {se}")
                     
                 except Exception as e:
                     logger.error(f"Error processing WS frame: {e}")
@@ -992,6 +1015,177 @@ async def websocket_test():
     except Exception as e:
         logger.error(f"WebSocket test failed: {e}")
         return {"success": False, "error": str(e)}
+
+
+# ============================================================================
+# NETWORK RECORDING VIA CDP
+# ============================================================================
+
+_recording_active = False
+_recording_fh = None          # open file handle (text mode, JSONL)
+_recording_path: Optional[str] = None
+_recording_count = 0
+_recording_cbs_registered = False
+
+
+def _write_record_event(event_type: str, data: dict) -> None:
+    """Append one JSON-lines record to the active recording file."""
+    global _recording_count
+    if not _recording_active or _recording_fh is None:
+        return
+    import datetime as _dt
+    record = {"event": event_type, "timestamp": _dt.datetime.now().isoformat()}
+    record.update(data)
+    try:
+        _recording_fh.write(json.dumps(record) + "\n")
+        _recording_fh.flush()
+        _recording_count += 1
+    except Exception as e:
+        logger.warning(f"Recording write error: {e}")
+
+
+async def _register_recording_callbacks() -> bool:
+    """Register CDP Network callbacks for HTTP + WebSocket recording.
+    Called once per server lifetime; callbacks check _recording_active at call time."""
+    global session, _recording_cbs_registered
+    if _recording_cbs_registered:
+        return True
+    if not session:
+        return False
+    try:
+        cdp_client = session.cdp_client
+        cdp_session = await session.get_or_create_cdp_session()
+        session_id = cdp_session.session_id
+
+        def on_rec_request(event: dict, sid=None):
+            if not _recording_active:
+                return
+            req = event.get("request", {})
+            _write_record_event("request", {
+                "requestId": event.get("requestId", ""),
+                "url": req.get("url", ""),
+                "method": req.get("method", ""),
+                "headers": req.get("headers", {}),
+                "post_data": req.get("postData"),
+            })
+
+        def on_rec_response(event: dict, sid=None):
+            if not _recording_active:
+                return
+            resp = event.get("response", {})
+            _write_record_event("response", {
+                "requestId": event.get("requestId", ""),
+                "url": resp.get("url", ""),
+                "status": resp.get("status"),
+                "headers": resp.get("headers", {}),
+            })
+
+        def _parse_ws_payload(event: dict) -> dict:
+            payload_data = event.get("response", {}).get("payloadData", "")
+            try:
+                return json.loads(payload_data) if payload_data else {}
+            except json.JSONDecodeError:
+                return {"raw": payload_data}
+
+        def on_rec_ws_sent(event: dict, sid=None):
+            if not _recording_active:
+                return
+            _write_record_event("ws_sent", {
+                "requestId": event.get("requestId", ""),
+                "opcode": event.get("response", {}).get("opcode", 0),
+                "payload": _parse_ws_payload(event),
+            })
+
+        def on_rec_ws_received(event: dict, sid=None):
+            if not _recording_active:
+                return
+            _write_record_event("ws_received", {
+                "requestId": event.get("requestId", ""),
+                "opcode": event.get("response", {}).get("opcode", 0),
+                "payload": _parse_ws_payload(event),
+            })
+
+        cdp_client.register.Network.requestWillBeSent(on_rec_request)
+        cdp_client.register.Network.responseReceived(on_rec_response)
+        cdp_client.register.Network.webSocketFrameSent(on_rec_ws_sent)
+        cdp_client.register.Network.webSocketFrameReceived(on_rec_ws_received)
+        await cdp_client.send.Network.enable(session_id=session_id)
+
+        _recording_cbs_registered = True
+        logger.info("Recording CDP callbacks registered")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to register recording callbacks: {e}")
+        return False
+
+
+@app.post("/record/start")
+async def record_start(request: Request):
+    """Start recording HTTP + WebSocket traffic to a JSONL file."""
+    global _recording_active, _recording_fh, _recording_path, _recording_count
+
+    if not session:
+        raise HTTPException(
+            status_code=503,
+            detail="Browser not running. Start it with: slack-chat server start",
+        )
+    if _recording_active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Recording already in progress: {_recording_path}",
+        )
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    file_arg = body.get("file")
+    if file_arg:
+        out_path = Path(file_arg)
+    else:
+        tmp_dir = WORKSPACE_ROOT / "tmp"
+        tmp_dir.mkdir(exist_ok=True)
+        out_path = tmp_dir / f"{int(time.time())}.jsonl"
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ok = await _register_recording_callbacks()
+    if not ok:
+        raise HTTPException(status_code=500, detail="Failed to register CDP callbacks")
+
+    _recording_fh = open(out_path, "w", encoding="utf-8")
+    _recording_path = str(out_path)
+    _recording_count = 0
+    _recording_active = True
+
+    logger.info(f"Recording started: {out_path}")
+    return {"status": "started", "file": _recording_path}
+
+
+@app.post("/record/stop")
+async def record_stop():
+    """Stop the active recording and close the output file."""
+    global _recording_active, _recording_fh, _recording_count
+
+    if not _recording_active:
+        raise HTTPException(status_code=409, detail="No recording in progress")
+
+    _recording_active = False
+    count = _recording_count
+    path = _recording_path
+
+    if _recording_fh:
+        try:
+            _recording_fh.flush()
+            _recording_fh.close()
+        except Exception:
+            pass
+        _recording_fh = None
+
+    logger.info(f"Recording stopped: {path} ({count} events)")
+    return {"status": "stopped", "file": path, "events": count}
 
 
 # ============================================================================
@@ -1343,8 +1537,11 @@ async def _fetch_context_for_watch(
 
 
 async def _init_watch_engine():
-    """Initialize the watch engine on server startup."""
-    global _watch_engine
+    """Initialize the watch and signal engines on server startup."""
+    global _watch_engine, _signal_engine
+
+    _signal_engine = SignalEngine()
+    _signal_engine.load_config()
     
     _watch_engine = WatchEngine(
         resolve_channel_func=_resolve_channel_for_watch,
@@ -1361,8 +1558,11 @@ async def _init_watch_engine():
     if _watch_engine.config.rules:
         _watch_engine.start()
         logger.info(f"Watch engine auto-started with {len(_watch_engine.config.rules)} rules")
-        
-        # Also start WebSocket monitoring to receive messages
+        await _start_websocket_monitoring()
+
+    # Also start WS monitoring if signal handlers are configured
+    if _signal_engine and _signal_engine._handlers and not _ws_monitoring:
+        logger.info(f"Signal engine auto-starting WS monitoring ({list(_signal_engine._handlers)} configured)")
         await _start_websocket_monitoring()
 
 
@@ -1387,6 +1587,10 @@ async def watch_reload():
     success = await _watch_engine.load_config()
     rules_count = len(_watch_engine.config.rules)
     
+    # Reload signal handlers from same config file
+    if _signal_engine:
+        _signal_engine.load_config()
+
     # Auto-start watch engine and WebSocket monitoring if we have rules
     if rules_count > 0:
         if not _watch_engine.is_running():
@@ -1394,10 +1598,15 @@ async def watch_reload():
         # Ensure WebSocket monitoring is running
         if not _ws_monitoring:
             await _start_websocket_monitoring()
-    
+
+    # Ensure WS monitoring is running if signal handlers are configured
+    if _signal_engine and _signal_engine._handlers and not _ws_monitoring:
+        await _start_websocket_monitoring()
+
     return {
         "success": True,  # Config was read (even if no rules loaded)
         "rules_loaded": rules_count,
+        "signals_loaded": sum(len(v) for v in (_signal_engine._handlers if _signal_engine else {}).values()),
         "running": _watch_engine.is_running(),
         "ws_monitoring": _ws_monitoring,
         "message": f"Loaded {rules_count} rules" if rules_count > 0 else "No rules loaded (check channel names)",

@@ -19,6 +19,46 @@ slack_url: "https://yourworkspace.slack.com/"
 #   reply: if true, post stdout+stderr as a reply to the triggering message
 #   case_insensitive: true (default) or false
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Signals
+# ─────────────────────────────────────────────────────────────────────────────
+# Each key is a signal name. The value is a list of shell commands that are
+# run in parallel (fire-and-forget) whenever that signal fires over WebSocket.
+#
+# Signal names and the WS event they map to:
+#   new_message    <- type: "message"               (new message in any channel)
+#   badge_updated  <- type: "badge_counts_updated"  (workspace unread badge changed)
+#   channel_marked <- type: "channel_marked"        (channel read-position moved)
+#
+# Environment variables set for every command:
+#   $_SIGNAL   - signal name
+#   $_BUFFER   - path to a JSON file containing the full WS event payload
+#
+# Additional variables per signal:
+#   new_message:
+#     $_CHANNEL   $_USER   $_TS   $_TEXT   $_THREAD_TS   $_SUBTYPE
+#   badge_updated:
+#     $_BADGE_CHANNEL   $_BADGE_DM   $_BADGE_AT_USER   $_BADGE_THREAD
+#   channel_marked:
+#     $_CHANNEL   $_TS   $_UNREAD_COUNT   $_UNREAD_COUNT_DISPLAY
+
+signals:
+  # Fires on every new message delivered to the Slack client.
+  # Most direct signal — arrives as soon as the message is posted.
+  #new_message:
+  #  - "echo \"new message in $_CHANNEL from $_USER: $_TEXT\""
+  #  - "slack-chat activity --limit 20"
+
+  # Fires when the workspace-level unread badge count changes.
+  # Slightly delayed (~2s after the message). Does not identify which channel.
+  #badge_updated:
+  #  - "echo \"badge updated — channel: $_BADGE_CHANNEL dm: $_BADGE_DM\""
+
+  # Fires when the read-cursor of a specific channel advances.
+  # Useful to detect when a channel transitions to having unread messages.
+  #channel_marked:
+  #  - "echo \"channel $_CHANNEL marked — unread: $_UNREAD_COUNT\""
+
 watch:
   # Watch a channel by name (will be resolved to ID)
   #general:

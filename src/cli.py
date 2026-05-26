@@ -4,7 +4,7 @@ import sys
 import typer
 
 # Import command modules
-from .commands import server, client, inbox, resolve, write, activity, api
+from .commands import server, client, inbox, resolve, write, activity, api, record, listen
 
 TARGET_EXAMPLES = """
 Valid target values:
@@ -48,6 +48,8 @@ REMOTE commands (direct remote/API operations):
     server navigate      Navigate browser to URL
     server reload        Reload config.yaml
     activity             Show activity feed — mentions, threads, reactions
+    record start         Start recording HTTP + WebSocket traffic to JSONL
+    record stop          Stop active recording
     search               Search messages
     read-message         Read messages, threads, or around-context windows
     resolve              Resolve names/IDs/events/URLs into components
@@ -639,6 +641,59 @@ Examples:
     slack-chat activity --tab threads -n 10
     slack-chat activity --tab reactions
 """.strip(),
+        ("record",): """
+record
+
+Usage:
+    slack-chat record <subcommand>
+
+Subcommands:
+    start   Begin recording HTTP + WebSocket traffic to a JSONL file
+    stop    Stop the active recording and close the file
+
+Description:
+    Records all network traffic (HTTP requests/responses and WebSocket frames)
+    from the running browser session via CDP.  Requires the browser server to
+    be running (slack-chat server start).  Only one recording at a time.
+    Output is JSONL — one JSON object per line, each with an "event" field:
+      request | response | ws_sent | ws_received
+
+Examples:
+    slack-chat record start
+    slack-chat record start /tmp/my-recording.jsonl
+    slack-chat record stop
+""".strip(),
+        ("record", "start"): """
+record start
+
+Usage:
+    slack-chat record start [file]
+
+Description:
+    Start recording HTTP requests/responses and WebSocket frames.
+    Only one recording at a time is allowed.
+    Browser server must already be running.
+
+Arguments:
+    file   Output path (default: tmp/<unix_timestamp>.jsonl)
+
+Examples:
+    slack-chat record start
+    slack-chat record start /tmp/session.jsonl
+""".strip(),
+        ("record", "stop"): """
+record stop
+
+Usage:
+    slack-chat record stop
+
+Description:
+    Stop the active recording, flush and close the output file.
+    Prints the file path and total event count.
+
+Example:
+    slack-chat record stop
+""".strip(),
 }
 
 
@@ -684,6 +739,10 @@ HELP_TREE = {
         "react": {},
         "mute": {},
         "activity": {},
+        "record": {
+                "start": {},
+                "stop": {},
+        },
 }
 
 
@@ -728,6 +787,8 @@ typer_app.add_typer(server.app, name="server")
 typer_app.add_typer(inbox.app, name="inbox")
 typer_app.add_typer(resolve.channel_app, name="channel")
 typer_app.add_typer(resolve.user_app, name="user")
+typer_app.add_typer(record.app, name="record")
+typer_app.add_typer(listen.app, name="listen")
 
 # Add top-level commands from write module
 typer_app.command("pull")(write.pull_command)
