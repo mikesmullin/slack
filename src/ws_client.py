@@ -25,6 +25,11 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+class SlackAuthError(RuntimeError):
+    """Raised when the Slack gateway rejects our credentials (invalid_auth)."""
+
+
 WORKSPACE_ROOT = Path(__file__).parent.parent
 TOKENS_FILE = WORKSPACE_ROOT / ".tokens.yaml"
 
@@ -43,9 +48,8 @@ START_ARGS = (
 
 def _load_tokens() -> dict:
     if not TOKENS_FILE.exists():
-        raise RuntimeError(
-            ".tokens.yaml not found — start the server and log in first "
-            "(slack-chat server start)"
+        raise SlackAuthError(
+            ".tokens.yaml not found — credentials unavailable"
         )
     return yaml.safe_load(TOKENS_FILE.read_text()) or {}
 
@@ -184,7 +188,7 @@ class SlackWSClient:
 
         while True:
             url = _build_url(token, enterprise_id, gateway_server, frt=self._frt)
-            self._frt = None  # consume the frt — will be refreshed on next hello
+            self._frt = None  # consume the frt — will be refreshed on next reconnect_url
 
             try:
                 async with websockets.connect(
@@ -194,10 +198,28 @@ class SlackWSClient:
                     ping_interval=None,   # we manage pings manually
                     ping_timeout=None,
                 ) as ws:
+                    # First message must be hello; error means bad credentials
+                    first_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    first = json.loads(first_raw)
+                    if first.get("type") == "error":
+                        err = first.get("error") or {}
+                        if err.get("code") == 401 or err.get("msg") == "invalid_auth":
+                            raise SlackAuthError(
+                                f"Slack rejected credentials: {err.get('msg', 'invalid_auth')}"
+                            )
+                        logger.warning(f"WS error on connect (non-auth): {first}")
+                        continue  # retry connection
+                    elif first.get("type") != "hello":
+                        logger.warning(f"Expected hello, got {first.get('type')!r}")
+
                     logger.info("WebSocket connected")
+                    self._first_pong_done = False  # reset per session
+                    yield first  # let caller see the hello (auth confirmed)
                     async for event in self._run_session(ws):
                         yield event
 
+            except SlackAuthError:
+                raise  # propagate — caller must refresh credentials
             except websockets.exceptions.ConnectionClosed as e:
                 logger.warning(f"WebSocket closed ({e.code} {e.reason}), reconnecting...")
                 await asyncio.sleep(2)
@@ -240,6 +262,9 @@ class SlackWSClient:
                 continue  # don't yield reconnect_url — it's housekeeping
 
             if event_type == "pong":
-                continue  # don't yield pongs
+                if not getattr(self, "_first_pong_done", False):
+                    self._first_pong_done = True
+                    yield event  # signal first successful ping-pong to caller
+                continue  # don't yield subsequent pongs
 
             yield event

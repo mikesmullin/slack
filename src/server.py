@@ -183,7 +183,7 @@ async def lifespan(app: FastAPI):
     PID_FILE.write_text(str(os.getpid()))
     
     session = Browser(
-        headless=False,
+        headless=os.environ.get("SLACK_HEADLESS", "").lower() in ("1", "true", "yes"),
         user_data_dir=str(DATA_DIR),
     )
     

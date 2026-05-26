@@ -62,6 +62,9 @@ def server_start(
     background: bool = typer.Option(
         True, "--background", "-b", help="Run the server in the background"
     ),
+    headless: bool = typer.Option(
+        False, "--headless", help="Run the browser in headless mode (no visible window)"
+    ),
 ):
     """Start the Slack browser server."""
     import httpx
@@ -89,10 +92,14 @@ def server_start(
         "info",
     ]
 
+    env = os.environ.copy()
+    if headless:
+        env["SLACK_HEADLESS"] = "1"
+
     if background:
         print(f"Starting server in background... logs at {LOG_FILE}")
         with open(LOG_FILE, "a") as f:
-            process = subprocess.Popen(cmd, stdout=f, stderr=f, start_new_session=True)
+            process = subprocess.Popen(cmd, stdout=f, stderr=f, start_new_session=True, env=env)
 
         PID_FILE.write_text(str(process.pid))
 
@@ -108,7 +115,7 @@ def server_start(
                 time.sleep(1)
         print("⏳ Server starting... check `slack-chat server status`")
     else:
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=env)
 
 
 @app.command("stop")
