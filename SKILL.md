@@ -286,11 +286,16 @@ id_prefix_type: user
 
 ### `slack-chat post-message`
 - Purpose: unified post command (channel post or thread reply from target context).
-- Usage: `slack-chat post-message <target> <text>`
+- Usage: `slack-chat post-message <target> <text> [--image PATH] [--attachment PATH]`
+- Options:
+  - `--image` / `-i`: upload an image with the post. Repeat for multiple images.
+  - `--attachment` / `-a`: upload a file with the post. Repeat for multiple files.
+- When files are provided, `<text>` is used as the Slack upload's initial comment.
 - Examples:
 ```bash
 slack-chat post-message #sre-team "Heads up: deploy starting"
 slack-chat post-message "C01ABCDEF2:1709253181.804579@1707924824.356449" "Thanks for the context"
+slack-chat post-message #sre-team "Page is returning HTTP 500" --image ./screenshot.png
 ```
 - Stdout pattern:
 ```text

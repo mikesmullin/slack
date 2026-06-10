@@ -141,18 +141,24 @@ Examples:
 post-message
 
 Usage:
-    slack-chat post-message <target> <text>
+    slack-chat post-message <target> <text> [--image PATH] [--attachment PATH]
 
 Description:
     Unified write command.
     - If target is channel name/ID: posts channel message
     - If target has timestamp context: posts thread reply
+    - If --image or --attachment is provided, uploads the file and uses <text> as the initial comment
+
+Options:
+    --image, -i PATH       Image file to upload with the post. Repeat for multiple images.
+    --attachment, -a PATH  File to upload with the post. Repeat for multiple files.
 
 {TARGET_EXAMPLES}
 
 Examples:
     slack-chat post-message #sre-team "Heads up: deploy starting"
     slack-chat post-message "CTXPNCU3T:1709253181.804579@1707924824.356449" "Thanks for the context"
+    slack-chat post-message #sre-team "Page is returning HTTP 500" --image ./screenshot.png
 """.strip(),
         ("post-reaction",): """
 post-reaction

@@ -7,7 +7,9 @@ import json
 import httpx
 import os
 import re
+import mimetypes
 from urllib.parse import urlparse
+from pathlib import Path
 from typing import Any, Optional
 
 from ..utils import (
@@ -73,6 +75,121 @@ def _post_api(endpoint: str, params: dict) -> dict:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def _require_ok(data: dict, endpoint: str) -> None:
+    if data.get("ok"):
+        return
+    print(
+        yaml.dump(
+            {
+                "ok": False,
+                "endpoint": endpoint,
+                "error": data.get("error", "unknown"),
+            },
+            indent=2,
+            sort_keys=False,
+        ),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _upload_file_to_slack(upload_url: str, path: Path) -> None:
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    try:
+        with httpx.Client(timeout=120.0) as http:
+            response = http.post(
+                upload_url,
+                content=path.read_bytes(),
+                headers={"Content-Type": content_type},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as e:
+        print(f"Error: failed to upload {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _extract_uploaded_message_ts(data: dict, channel_id: str) -> str | None:
+    files = data.get("files") or []
+    if data.get("file"):
+        files.append(data["file"])
+
+    for file_data in files:
+        shares = file_data.get("shares") or {}
+        for visibility in ("public", "private"):
+            channel_shares = (shares.get(visibility) or {}).get(channel_id) or []
+            for share in channel_shares:
+                if share.get("ts"):
+                    return share["ts"]
+    return None
+
+
+def _complete_file_uploads(
+    channel_id: str,
+    initial_comment: str,
+    paths: list[Path],
+    thread_ts: str | None = None,
+) -> dict:
+    files: list[dict[str, str]] = []
+
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            print(f"Error: attachment does not exist or is not a file: {path}", file=sys.stderr)
+            sys.exit(1)
+
+        upload_data = _post_api(
+            "files.getUploadURLExternal",
+            {"filename": path.name, "length": path.stat().st_size},
+        )
+        _require_ok(upload_data, "files.getUploadURLExternal")
+
+        upload_url = upload_data.get("upload_url")
+        file_id = upload_data.get("file_id")
+        if not upload_url or not file_id:
+            print(
+                yaml.dump(
+                    {
+                        "ok": False,
+                        "endpoint": "files.getUploadURLExternal",
+                        "error": "missing_upload_url_or_file_id",
+                    },
+                    indent=2,
+                    sort_keys=False,
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        _upload_file_to_slack(upload_url, path)
+        files.append({"id": file_id, "title": path.name})
+
+    params: dict[str, Any] = {
+        "files": files,
+        "channel_id": channel_id,
+        "initial_comment": initial_comment,
+    }
+    if thread_ts:
+        params["thread_ts"] = thread_ts
+
+    data = _post_api("files.completeUploadExternal", params)
+    _require_ok(data, "files.completeUploadExternal")
+
+    message_ts = _extract_uploaded_message_ts(data, channel_id)
+    if not message_ts and files:
+        info_data = _post_api("files.info", {"file": files[0]["id"]})
+        if info_data.get("ok"):
+            message_ts = _extract_uploaded_message_ts(info_data, channel_id)
+    if message_ts:
+        data["message_ts"] = message_ts
+        data["event_id"] = format_event_id(channel_id, message_ts, thread_ts)
+        permalink_data = _post_api(
+            "chat.getPermalink", {"channel": channel_id, "message_ts": message_ts}
+        )
+        if permalink_data.get("ok") and permalink_data.get("permalink"):
+            data["permalink"] = permalink_data["permalink"]
+
+    return data
 
 
 def _clean_text(text: str) -> str:
@@ -1001,6 +1118,18 @@ def post_message(
         help="Channel name/ID OR CHANNEL:TIMESTAMP OR CHANNEL:TIMESTAMP@THREAD_TS OR Slack permalink",
     ),
     text: str = typer.Argument(..., help="Message text"),
+    images: Optional[list[Path]] = typer.Option(
+        None,
+        "--image",
+        "-i",
+        help="Image file to upload with the post. Repeat for multiple images.",
+    ),
+    attachments: Optional[list[Path]] = typer.Option(
+        None,
+        "--attachment",
+        "-a",
+        help="File to upload with the post. Repeat for multiple files.",
+    ),
 ):
     """Post a channel message, or reply to a thread when target includes thread context."""
     normalized_text = _normalize_markdown_links(text)
@@ -1008,6 +1137,18 @@ def post_message(
     channel_id = context["resolved_channel_id"]
     timestamp = context["timestamp"]
     thread_ts = context["thread_ts"]
+    attachment_paths = [*(images or []), *(attachments or [])]
+
+    if attachment_paths:
+        data = _complete_file_uploads(
+            channel_id=channel_id,
+            initial_comment=normalized_text,
+            paths=attachment_paths,
+            thread_ts=thread_ts or timestamp if timestamp else None,
+        )
+        print(f"{_fg_rgb('target', 250, 208, 44)}: {_fg_rgb(context['target_summary'], 214, 224, 255)}")
+        print(yaml.dump(data, indent=2, sort_keys=False))
+        return
 
     # If target includes message context, post as a thread reply.
     if timestamp:
