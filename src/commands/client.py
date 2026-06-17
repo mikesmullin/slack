@@ -7,6 +7,7 @@ import json
 import httpx
 import os
 import re
+import time
 import mimetypes
 from urllib.parse import urlparse
 from pathlib import Path
@@ -27,6 +28,9 @@ from .. import storage
 
 # Create Typer app for client commands
 app = typer.Typer(help="Slack client commands")
+
+# Aggregate timing counters for the optional SLACK_TRACE critical-path trace.
+_TRACE_STATS = {"api_calls": 0, "api_ms": 0.0}
 
 
 def _supports_color() -> bool:
@@ -56,6 +60,8 @@ def _parse_response_data(response: httpx.Response) -> dict:
 
 def _post_api(endpoint: str, params: dict) -> dict:
     """Call API endpoint and return parsed payload with concise errors."""
+    trace = os.getenv("SLACK_TRACE") not in (None, "", "0")
+    start = time.perf_counter() if trace else 0.0
     try:
         with get_client() as client:
             response = client.post(
@@ -75,6 +81,17 @@ def _post_api(endpoint: str, params: dict) -> dict:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        if trace:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            _TRACE_STATS["api_calls"] += 1
+            _TRACE_STATS["api_ms"] += elapsed_ms
+            print(
+                f"[trace] api {endpoint} {elapsed_ms:.0f}ms "
+                f"(total {_TRACE_STATS['api_calls']} calls, "
+                f"{_TRACE_STATS['api_ms']:.0f}ms)",
+                file=sys.stderr,
+            )
 
 
 def _require_ok(data: dict, endpoint: str) -> None:

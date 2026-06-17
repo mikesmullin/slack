@@ -13,6 +13,13 @@ from typing import Optional, Dict, List, Any, Tuple
 
 import yaml
 
+# Prefer the libyaml C loader when available — it parses the large user/channel
+# cache files ~6x faster than the pure-Python loader.
+try:
+    from yaml import CSafeLoader as _FastLoader
+except ImportError:  # pragma: no cover - libyaml not built
+    from yaml import SafeLoader as _FastLoader
+
 WORKSPACE_ROOT = Path(__file__).parent.parent
 STORAGE_DIR = WORKSPACE_ROOT / "storage"
 CACHE_DIR = STORAGE_DIR / "_cache"
@@ -324,15 +331,38 @@ def is_message_read(frontmatter: Dict[str, Any]) -> bool:
 # ID Resolution Cache
 # =============================================================================
 
+# In-process memo for parsed cache files: path -> ((mtime_ns, size), data).
+# Keeps a hot command from re-parsing multi-MB YAML on every lookup.
+_CACHE_MEMO: Dict[str, Tuple[Tuple[int, int], Dict[str, Any]]] = {}
+
+
 def _load_cache(cache_file: Path) -> Dict[str, Any]:
-    """Load a cache file, returning empty dict if not exists."""
-    if not cache_file.exists():
+    """Load a cache file, returning empty dict if not exists.
+
+    The parsed result is memoized in-process and keyed by the file's
+    (mtime, size). Repeated lookups within a single command therefore parse the
+    (potentially multi-MB) YAML cache at most once instead of re-parsing it on
+    every user/channel resolution.
+    """
+    try:
+        stat = cache_file.stat()
+    except OSError:
         return {}
+
+    key = str(cache_file)
+    signature = (stat.st_mtime_ns, stat.st_size)
+    cached = _CACHE_MEMO.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
     try:
         content = cache_file.read_text(encoding="utf-8")
-        return yaml.safe_load(content) or {}
+        data = yaml.load(content, Loader=_FastLoader) or {}
     except Exception:
         return {}
+
+    _CACHE_MEMO[key] = (signature, data)
+    return data
 
 
 def _save_cache(cache_file: Path, data: Dict[str, Any]):
@@ -340,6 +370,13 @@ def _save_cache(cache_file: Path, data: Dict[str, Any]):
     ensure_storage_dirs()
     content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
     cache_file.write_text(content, encoding="utf-8")
+    # Keep the in-process memo consistent with what we just wrote so the next
+    # read does not re-parse the file we already hold in memory.
+    try:
+        stat = cache_file.stat()
+        _CACHE_MEMO[str(cache_file)] = ((stat.st_mtime_ns, stat.st_size), data)
+    except OSError:
+        _CACHE_MEMO.pop(str(cache_file), None)
 
 
 def get_cached_user(user_id: str) -> Optional[Dict[str, Any]]:
