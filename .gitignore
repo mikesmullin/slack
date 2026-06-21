@@ -1,15 +1,20 @@
-slack-server.pid
-slack-server.log
-config.yaml
-.tokens.yaml
-/storage/
+# bun / node
 node_modules/
-storage/.session-cache.json
-PROMPT.md
-/tmp/
-.venv/
-__pycache__/
+
+# runtime data
+db/cache/
+.tokens.yaml
+config.yaml
 .browser_data/
+/tmp/
+/logs/
+*.log
+*.pid
 .env
 buffer.json
-/logs/
+PROMPT.md
+
+# legacy (python) — kept ignored until src2 is removed
+/storage/
+.venv/
+__pycache__/

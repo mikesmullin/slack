@@ -1,71 +1,44 @@
-# Slack
+# 💬 Slack Chat
 
-Uses [browser-use](https://github.com/browser-use/browser-use) (via Chrome DevTools Protocol) to integrate with [Slack](https://slack.com/).
+Slack's UI is a notification firehose built for humans clicking around — not for agents or power users who want to read a thread, search history, or fire off a reply without leaving the terminal.
 
-It uses a client-server architecture for persistent browser sessions and automated authentication.
+`slack-chat` talks **directly to the Slack web API** over HTTP using saved session credentials — no browser in the hot path, no server to babysit. It's fast, scriptable, and battle-tested with modern  AI. The browser is launched exactly once, for SSO login, then closed.
 
-## 🏗️ File Structure
+## Stack
 
-```
-src/
-├── cli.py                # Typer CLI (server + client commands)
-└── server.py             # FastAPI browser server
-storage/
-└── users.yaml            # User ID to name mapping
-pyproject.toml            # Project configuration
-```
+| Layer | Technology |
+|---|---|
+| Runtime | [Bun](https://bun.sh) v1.3+ |
+| Language | JavaScript (ES modules, `.mjs`) |
+| Transport | native `fetch` + `WebSocket` (Slack web API) |
+| Data | YAML files ([`js-yaml`](https://github.com/nodeca/js-yaml)) |
+| Login | the reusable [`browser`](https://github.com/) tool (headed SSO, one-time) |
 
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Python 3.12+
-- `uv` package manager
-
-### Installation
-
-Install the tool globally in **editable mode** using `uv`:
+## Setup
 
 ```bash
-uv tool install --editable .
+bun install
+bun link                 # exposes the `slack-chat` command globally
+slack-chat auth login    # one-time SSO login (requires the `browser` tool)
+slack-chat auth status   # confirm credentials are valid
 ```
 
-Editable mode means the `slack` command will always use the current source code from your workspace, so changes are reflected immediately without reinstalling.
-
-Now you can use the `slack` command anywhere!
-
-### Usage
-
-Command usage examples and CLI reference are maintained in `SKILL.md`.
-
-## 🔧 Development
-
-### Running from Source
-
-Run commands directly from source with `uv run slack-chat ...`.
-See `SKILL.md` for the up-to-date command examples.
-
-### Editable Installation (Recommended for Development)
-
-If you want to use the `slack` command globally while developing:
+## Usage
 
 ```bash
-uv tool install --editable .
+slack-chat read-message "C05R34P9KAA:1709253181.804579" -B 2 -A 2
+slack-chat search "site reliability" -n 5
+slack-chat activity --tab mentions -n 10
+slack-chat post-message "#sre-team" "Heads up: deploy starting"
+slack-chat resolve @jdoe
+slack-chat listen
 ```
 
-This creates symlinks, so any code changes are immediately reflected when running the `slack` command.
+See [`SKILL.md`](SKILL.md) for the full command reference, parameters, and output formats.
 
-## 🎯 How It Works
+## Caching
 
-1. **Server Start**: Launches a headed Chromium browser with persistent storage in `.browser_data/`
-2. **Authentication**: User logs in manually via the browser (supports any auth method)
-3. **Token Capture**: Lazily fetches Slack API token from browser's localStorage when needed
-4. **API Proxy**: Client commands are proxied through the browser's fetch context with proper Slack headers
-5. **Persistence**: Browser session persists between restarts (cookies, localStorage saved)
-
-## 📝 Notes
-
-- The browser runs in **headed mode** (visible window) - this is intentional for manual login
-- First time: navigate to `app.slack.com` and log in with your preferred method
-- Session data is stored in `.browser_data/` (gitignored)
-- The server must be running for client commands to work
+User and channel metadata are cached under `db/cache/{users,channels}.yml`.
+Lookups are cache-first; on a miss the API result is written back. This keeps the
+tool fast and avoids re-fetching IDs Slack won't expand for you. Use `--refresh`
+on `resolve` to bypass the cache after a rename.

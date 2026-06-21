@@ -7,263 +7,115 @@ description: communicate via slack-chat channels and direct messages with users
 
 ## Overview
 
-`slack-chat` is a Slack CLI with an offline-first storage model.
+`slack-chat` is a company-agnostic Slack CLI that calls the Slack web API
+**directly over HTTP** using saved session credentials. It is written in Bun
+(ES `.mjs` modules); the only dependency is `js-yaml`.
 
-It supports two operational modes:
-1. Local/offline workflows backed by `storage/` markdown and cache files.
-2. Remote/API workflows that call the Slack API directly using credentials in `.tokens.yaml`.
-
-This doc is the operational usage reference for agents:
-- command invocations
-- parameter expectations
-- stdout format examples
+- Day-to-day commands need **no browser** — they read `.tokens.yaml` and call the
+  Slack API with `fetch`.
+- The browser is used **only** during `auth login`, to capture credentials.
+- `listen` streams realtime events directly from the Slack WebSocket (no browser).
 
 All examples below are anonymized (`@jdoe`, `#sre-team`, placeholder IDs/URLs).
 
 ## Authentication — `.tokens.yaml`
 
-Remote API commands require a `.tokens.yaml` file in the workspace root. It is populated automatically when `server start` runs and the browser navigates to an authenticated Slack workspace.
+Commands require a `.tokens.yaml` file in the workspace root, written by
+`slack-chat auth login`:
 
 ```yaml
-token: xoxc-...        # xoxc- client token extracted from browser localStorage
-cookie: ...            # Slack 'd' session cookie (HttpOnly, extracted via CDP)
+token: xoxc-...        # xoxc client token from browser localStorage
+cookie: ...            # Slack 'd' session cookie (HttpOnly, captured via the browser tool)
 workspace_url: https://org.enterprise.slack.com  # from auth.test
-is_enterprise: true    # true for enterprise grid workspaces
+is_enterprise: true
+enterprise_id: E0123456
+gateway_server: T0123456-1   # cached WebSocket shard (for `listen`)
+refreshed_at: 2026-06-21T12:00:00.000Z
 ```
 
-**Credential extraction flow:**
-1. `server start` opens a Chromium browser via browser-use.
-2. If already authenticated (persistent profile in `.browser_data/`), credentials are extracted immediately.
-3. If not authenticated, log in to Slack in the browser window, then run `server refresh-session`.
-4. The `d` cookie is extracted via CDP `Storage.getCookies` (not `document.cookie`) so HttpOnly cookies are captured.
-5. `workspace_url` and `is_enterprise` are resolved via a direct `auth.test` call.
+**Login flow:**
+1. `slack-chat auth login` starts the headed `browser` tool and navigates to Slack.
+2. You complete SSO in the browser window.
+3. It captures the `xoxc` token (localStorage) and the `d` cookie (CDP), validates
+   them with `auth.test`, writes `.tokens.yaml`, and closes the browser.
 
-**Refreshing credentials:**
-- Credentials persist until the Slack session expires (typically days/weeks).
-- If API calls return auth errors, run `slack-chat server refresh-session` (browser must be running).
-- The browser can be stopped after credentials are saved — it is not required for subsequent API calls.
+**Checking / refreshing:**
+- `slack-chat auth status` prints whether credentials are present and still valid
+  (live `auth.test`), the workspace URL, and the enterprise flag.
+- If API calls start returning auth errors, run `slack-chat auth login` again.
 
-## Core IDs and Targets
+## The `target` identifier (global message id)
 
-### Event IDs
-- Channel message: `CHANNEL_ID:TIMESTAMP`
-- Thread message context: `CHANNEL_ID:TIMESTAMP@THREAD_TS`
+`target` uniquely identifies a single message and is the canonical argument for
+`read-message`, `reply`, `react`, and `resolve`.
 
-### Generic target format
-The unified target parser (used by `resolve`, `read-message`, `post-message`) accepts:
-- User name: `jdoe`
-- User name with prefix: `@jdoe`
-- User ID: `U01ABCDEF2`
-- Channel name: `sre-team`
-- Channel name with prefix: `#sre-team`
-- Channel ID: `C01ABCDEF2`
-- Event ID: `C01ABCDEF2:1709253181.804579`
-- Event ID with thread: `C01ABCDEF2:1709253181.804579@1707924824.356449`
-- Slack permalink URL: `https://workspace.slack.com/archives/C123/p1771347628831459?thread_ts=1771345654.149809&cid=C123`
+```
+{channel_id}:{timestamp}[@{thread_ts}]
+```
 
-### Cache behavior
-- User/channel metadata cache location: `storage/_cache/users.yml`, `storage/_cache/channels.yml`
-- Resolution is cache-first.
-- On cache miss, API fallback is used.
-- Successful fallback writes back to cache.
+Examples:
 
-## Command Hierarchy
+```
+C05R34P9KAA                                        # a whole channel (no message)
+C05R34P9KAA:1709253181.804579                      # one top-level message
+C05R34P9KAA:1709253181.804579@1707924824.356449    # a reply within a thread
+D0AVD0EANE9:1782044100.717799                       # a message in a DM
+```
 
-### Local commands
-- `pull`
-- `inbox`
-  - `summary`
-  - `list`
-  - `view`
-  - `read`
-  - `mark-thread`
-  - `mark-channel`
-  - `unread`
-  - `context`
-- `mute`
-- `reply`
-- `react`
+Friendlier inputs are accepted and normalized to a `target`:
 
+| Input | Example |
+|---|---|
+| Channel name | `#sre-team` / `sre-team` |
+| User name / ID | `@jdoe` / `jdoe` / `U01ABCDEF2` |
+| Channel / event ID | `C01ABCDEF2`, `C01ABCDEF2:1709253181.804579` |
+| Permalink URL | `https://org.slack.com/archives/C01.../p1709253181804579?thread_ts=1707924824.356449` |
 
-### Remote commands
-- `server`
-  - `status`
-  - `start`
-  - `stop`
-  - `navigate`
-  - `reload`
-  - `refresh-session`
-- `search`
-- `read-message`
-- `resolve`
-- `post-message`
-- `post-reaction`
-- `api`
-- `channel`
-  - `describe`
-  - `tab`
-  - `resolve`
-  - `list`
-  - `find`
-  - `pending`
-- `user`
-  - `resolve`
-  - `list`
-  - `find`
-  - `status-get`
-  - `status-set`
+## Caching
+
+- User/channel metadata cache: `db/cache/users.yml`, `db/cache/channels.yml`.
+- Resolution is cache-first; on a miss, the API result is written back.
+- `resolve --refresh` bypasses the cache (e.g. after a rename).
 
 ## Command Reference
 
-### `slack-chat pull`
-- Purpose: pull unread Slack activity into local storage.
-- Usage: `slack-chat pull --since <date> [--limit N] [--type TYPE] [--channel CH] [--quiet]`
-- Example:
-```bash
-slack-chat pull --since "1 day ago" --limit 20 --type threads
-```
-- Stdout pattern:
-```text
-Pulling messages since ...
-...
-Done: <stored> stored, <skipped> skipped, <fetched> fetched total
-```
-
-### `slack-chat reply`
-- Purpose: reply to channel/thread target.
-- Usage: `slack-chat reply <id_or_channel> <text>`
-- Accepts channel names/IDs, storage IDs, event IDs.
-- Example:
-```bash
-slack-chat reply #sre-team "Following up"
-```
-- Stdout pattern:
-```yaml
-ok: true
-channel: C01ABCDEF2
-message_ts: '1709253181.804579'
-```
-
-### `slack-chat react`
-- Purpose: add reaction using storage ID or event ID.
-- Usage: `slack-chat react <id_or_event> <emoji>`
-- Example:
-```bash
-slack-chat react C01ABCDEF2:1709253181.804579 eyes
-```
-- Stdout pattern:
-```yaml
-ok: true
-channel: C01ABCDEF2
-timestamp: '1709253181.804579'
-emoji: eyes
-```
-
-### `slack-chat mute`
-- Purpose: mute channel notifications.
-- Usage: `slack-chat mute <channel_id>`
-- Example:
-```bash
-slack-chat mute C01ABCDEF2
-```
-- Stdout pattern:
-```yaml
-ok: true
-channel: C01ABCDEF2
-muted: true
-```
-
-### `slack-chat activity`
-- Purpose: show activity feed — mentions, thread replies, reactions.
-- Requires `.tokens.yaml` (no browser dependency at call time).
-- Usage: `slack-chat activity [--tab TAB] [--limit N] [--after EVENT_ID] [--yaml]`
-- Options:
-  - `--tab` / `-t`: `all` (default), `mentions`, `threads`, `reactions`
-  - `--limit` / `-n`: max items to fetch from API (default 25)
-  - `--after` / `-a`: only show items newer than this event ID or raw timestamp; accepts `CHANNEL:TS`, `CHANNEL:TS@THREAD_TS`, or a plain float timestamp string
-  - `--yaml`: dump raw YAML payload
-- Pagination: use the event ID printed at the end of any header line as `--after` to resume from that point.
-- Example:
-```bash
-slack-chat activity --tab mentions -n 10
-slack-chat activity --tab reactions
-slack-chat activity --tab threads --yaml
-slack-chat activity -n 50 --after C01ABCDEF2:1709253181.804579
-```
-- Stdout pattern (one item shown):
-```
-[thread] [unread]  2d ago  #sre-team (C01ABCDEF2)  @Jane Doe (U01ABCDEF2)  C01ABCDEF2:1709253181.804579@1707924824.356449:
-  message body line 1
-  message body line 2
-```
-- Badge types: `[mention]`, `[thread]`, `[reaction]`, plus optional `[unread]`
-- Age shown as `Nm ago`, `Nh ago`, or `Nd ago`
-- Channel displayed as `#name (ID)` or `Group DM: (@Name (UID), ...) (ID)` for MPDMs
-- Event ID at end of header is light-blue, terminated with `:`, usable directly as `--after` value
-
-### `slack-chat api`
-- Purpose: call any Slack API endpoint directly using saved credentials.
-- Requires `.tokens.yaml`.
-- Usage: `slack-chat api <endpoint> [--params JSON] [--data JSON] [--method GET|POST] [--yaml]`
-- Options:
-  - `--params` / `-p`: JSON object of query/form parameters
-  - `--data` / `-d`: additional JSON POST body parameters (merged with `--params`)
-  - `--method` / `-X`: `POST` (default) or `GET`
-  - `--yaml`: output as YAML instead of JSON
-- Examples:
-```bash
-slack-chat api auth.test
-slack-chat api users.list --params '{"limit": 10}'
-slack-chat api chat.postMessage --data '{"channel":"C01ABCDEF2","text":"Hello"}'
-slack-chat api conversations.list --method GET --params '{"limit": 5}'
-slack-chat api users.list --params '{"limit": 3}' --yaml
-```
-- Output: pretty-printed JSON (or YAML with `--yaml`); the raw API response object.
-
-### `slack-chat search`
-- Purpose: search remote messages.
-- Usage: `slack-chat search <query> [--count N] [--page N] [--yaml]`
-- Example:
-```bash
-slack-chat search "site reliability support" -n 3 -p 1
-```
-- Default stdout format (human/agent friendly):
-```text
-query: site reliability support
-pagination: page 1/12 | per_page 3 | total 34
-#sre-team (C01ABCDEF2:1709253181.804579@1707924824.356449) Jane Doe (@U01ABCDEF2): <John Doe|@U01ZZZZZZ1> can you take this?
-#eng-general (C09QRSTUV1:1709259999.111111) Pat Example (@U01HELLO12): We can support this.
-```
-- Inline `<@USER...>` references in message bodies are expanded to `<Name|@USER_ID>`.
+> All commands print a **compact, line-dense** format by default (one message
+> per line, names/IDs inlined) — that's what you normally want. While there is also
+> `--yaml` parameter to output machine-readable format. it's a niche option intended
+> moreso for deterministic script parsing or fetching obscure metadata; it's too verbose
+> for most cases, so don't reach for it unless you're certain you need it.
 
 ### `slack-chat read-message`
-- Purpose: unified read command (bounded cursor stream + around-mode context).
-- Usage:
-```bash
-slack-chat read-message <target> [--count N] [--before N] [--after N] [--yaml]
-```
+- Purpose: read a bounded message stream, or an around-context window.
+- Usage: `slack-chat read-message <target> [--count N] [--before N] [--after N] [--yaml]`
 - Modes:
-1. Cursor mode: use `--count`; when target includes `:TIMESTAMP` it resumes strictly after that timestamp.
-2. Around mode: use `-B/--before` and/or `-A/--after` with timestamped target.
+  1. Cursor stream: `--count`; when target includes `:TIMESTAMP`, resumes strictly after it.
+  2. Around mode: `-B/--before` and/or `-A/--after` with a timestamped target.
 - Examples:
 ```bash
 slack-chat read-message C01ABCDEF2 -n 20
 slack-chat read-message "C01ABCDEF2:1709253181.804579@1707924824.356449" -n 5
 slack-chat read-message "C01ABCDEF2:1709253181.804579@1707924824.356449" -B 2 -A 2
 ```
-- Default stdout format:
-```text
-target: target_type=message_event, channel_id=C01ABCDEF2, channel_id_prefix_type=channel_public, channel_name=sre-team, timestamp=1709253181.804579, thread_ts=1707924824.356449, event_id=C01ABCDEF2:1709253181.804579@1707924824.356449
-pagination: per_page 5 | returned 5 | has_more true
-#sre-team (C01ABCDEF2:1709253181.804579@1707924824.356449) Jane Doe (@U01ABCDEF2): Thanks.
-```
-- Around-mode stdout shows `context: before X | after Y | returned Z` and marks the focal line with `[target]`.
+- Around-mode marks the focal line with `[target]`.
+
+### `slack-chat search`
+- Purpose: search remote messages (paginated; inline `<@USER>` expanded).
+- Usage: `slack-chat search <query> [--count N] [--page N] [--yaml]`
+- Example: `slack-chat search "site reliability support" -n 3 -p 1`
+
+### `slack-chat activity`
+- Purpose: activity feed — mentions, thread replies, reactions.
+- Usage: `slack-chat activity [--tab TAB] [--limit N] [--after EVENT_ID] [--yaml]`
+- `--tab` / `-t`: `all` (default), `mentions`, `threads`, `reactions`
+- `--limit` / `-n`: max items (default 25)
+- `--after` / `-a`: only items newer than this event id or raw timestamp
+- Resume by passing the event id printed at the end of a header line to `--after`.
+- Example: `slack-chat activity --tab mentions -n 10`
 
 ### `slack-chat resolve`
-- Purpose: resolve any supported target into parsed components and names.
+- Purpose: resolve any target into parsed components and names.
 - Usage: `slack-chat resolve <target> [--refresh]`
-- Options:
-  - `--refresh / -r`: bypass the local cache and force a fresh API lookup; re-caches the result. Use when a channel has been renamed or a user's display name has changed.
 - Examples:
 ```bash
 slack-chat resolve @jdoe
@@ -272,202 +124,131 @@ slack-chat resolve U01ABCDEF2
 slack-chat resolve "C01ABCDEF2:1709253181.804579@1707924824.356449"
 slack-chat resolve C01ABCDEF2 --refresh
 ```
-- Stdout pattern:
-```text
-input: @jdoe
-target_type: name
-resolved_kind: user
-resolved_name: Jane Doe
-resolved_id: U01ABCDEF2
-id_prefix_type: user
-```
-- Colorized output is enabled on TTY unless `NO_COLOR=1`.
-- After a successful `--refresh`, the cache is updated, so subsequent `channel find` / `channel list` also reflect the new name.
 
 ### `slack-chat post-message`
-- Purpose: unified post command (channel post or thread reply from target context).
+- Purpose: post a channel message, or reply when the target carries thread context.
 - Usage: `slack-chat post-message <target> <text> [--image PATH] [--attachment PATH]`
-- Options:
-  - `--image` / `-i`: upload an image with the post. Repeat for multiple images.
-  - `--attachment` / `-a`: upload a file with the post. Repeat for multiple files.
-- When files are provided, `<text>` is used as the Slack upload's initial comment.
+- `--image` / `-i`, `--attachment` / `-a`: repeatable; `<text>` becomes the upload's initial comment.
 - Examples:
 ```bash
 slack-chat post-message #sre-team "Heads up: deploy starting"
-slack-chat post-message "C01ABCDEF2:1709253181.804579@1707924824.356449" "Thanks for the context"
-slack-chat post-message #sre-team "Page is returning HTTP 500" --image ./screenshot.png
+slack-chat post-message "C01ABCDEF2:1709253181.804579@1707924824.356449" "Thanks"
+slack-chat post-message #sre-team "HTTP 500" --image ./screenshot.png
 ```
-- Stdout pattern:
-```text
-target: target_type=channel, channel_id=C01ABCDEF2, channel_id_prefix_type=channel_public, channel_name=sre-team
-ok: true
-channel: C01ABCDEF2
-...
-```
+
+### `slack-chat reply`
+- Purpose: reply to a channel or thread.
+- Usage: `slack-chat reply <id_or_channel> <text>`
+- Example: `slack-chat reply C01ABCDEF2:1709253181.804579 "Following up"`
+
+### `slack-chat react`
+- Purpose: add a reaction using an event id.
+- Usage: `slack-chat react <id_or_event> <emoji>`
+- Example: `slack-chat react C01ABCDEF2:1709253181.804579 eyes`
 
 ### `slack-chat post-reaction`
-- Purpose: add reaction to a specific message timestamp.
+- Purpose: add a reaction to a channel + timestamp.
 - Usage: `slack-chat post-reaction <channel> <timestamp> <emoji_name>`
-- Example:
+- Example: `slack-chat post-reaction C01ABCDEF2 1709253181.804579 thumbsup`
+
+### `slack-chat api`
+- Purpose: call any Slack API endpoint directly with saved credentials.
+- Usage: `slack-chat api <endpoint> [--params JSON] [--data JSON] [--method GET|POST] [--yaml]`
+- Examples:
 ```bash
-slack-chat post-reaction C01ABCDEF2 1709253181.804579 thumbsup
-```
-- Stdout pattern:
-```yaml
-ok: true
-channel: C01ABCDEF2
-timestamp: '1709253181.804579'
-emoji: thumbsup
+slack-chat api auth.test
+slack-chat api users.list --params '{"limit": 10}'
+slack-chat api chat.postMessage --data '{"channel":"C01ABCDEF2","text":"Hello"}'
 ```
 
-## `server` Subcommands
-
-### `slack-chat server status`
-- Purpose: show server/token health.
-- Example: `slack-chat server status`
-
-### `slack-chat server start`
-- Purpose: start browser server.
-- Usage: `slack-chat server start [--background|-b]`
-
-### `slack-chat server stop`
-- Purpose: stop browser server.
-
-### `slack-chat server navigate`
-- Purpose: navigate managed browser.
-- Usage: `slack-chat server navigate <url>`
-
-### `slack-chat server reload`
-- Purpose: reload watch/config without restart.
-
-### `slack-chat server refresh-session`
-- Purpose: re-extract token and `d` cookie from the open browser and update `.tokens.yaml`.
-- Run this after logging in to Slack if the server started before authentication completed, or when API calls start returning auth errors.
-- The browser server must be running.
-- Example: `slack-chat server refresh-session`
-- Stdout pattern:
-```text
-✅ Session credentials refreshed
-   Token:        xoxc-598587...
-   Cookie:       ✅
-   Workspace:    https://org.enterprise.slack.com
-   Enterprise:   True
-```
-
-## `inbox` Subcommands
-
-### `slack-chat inbox summary`
-- Purpose: show unread/read totals.
-- Usage: `slack-chat inbox summary [--online]`
-
-### `slack-chat inbox list`
-- Purpose: list inbox items.
-- Usage:
+### `slack-chat listen`
+- Purpose: stream realtime Slack events directly from the WebSocket (no browser).
+- Usage: `slack-chat listen [--raw] [--type TYPE,...] [--quiet]`
+- `--raw`: print each event as a JSON line
+- `--type` / `-t`: comma-separated event types to include (e.g. `message,channel_marked`)
+- `--quiet` / `-q`: suppress human-readable output
+- Examples:
 ```bash
-slack-chat inbox list [--type TYPE] [--limit N] [--since DATE] [--all] [--online] [--thread-cursor CURSOR]
+slack-chat listen
+slack-chat listen --raw
+slack-chat listen --type message,channel_marked
 ```
-
-### `slack-chat inbox view`
-- Purpose: view one stored/online message.
-- Usage: `slack-chat inbox view <id_or_event> [--online]`
-
-### `slack-chat inbox read`
-- Purpose: mark one message read.
-- Usage: `slack-chat inbox read <id_or_event> [--offline-only]`
-
-### `slack-chat inbox mark-thread`
-- Purpose: mark thread read.
-- Usage: `slack-chat inbox mark-thread <id_or_event> [--offline-only]`
-
-### `slack-chat inbox mark-channel`
-- Purpose: mark channel read.
-- Usage: `slack-chat inbox mark-channel <channel_id> [--offline-only]`
-
-### `slack-chat inbox unread`
-- Purpose: mark one message unread (local only).
-- Usage: `slack-chat inbox unread <id_or_event>`
-
-### `slack-chat inbox context`
-- Purpose: show surrounding context.
-- Usage: `slack-chat inbox context <event_id> [--limit N]`
 
 ## `channel` Subcommands
 
 ### `slack-chat channel describe`
-- Purpose: fetch channel metadata.
+- Purpose: fetch channel metadata, including `channel.tabs_resolved` (stable tab
+  index, name, and URLs for file-backed tabs such as canvases).
 - Usage: `slack-chat channel describe <channel>`
-- Notes:
-  - Output includes `channel.tabs_resolved` with stable tab index, tab name, and URLs (when tab is file-backed, e.g. canvas).
 
 ### `slack-chat channel tab`
-- Purpose: fetch one channel tab body/content via authenticated browser server proxy.
+- Purpose: fetch one channel tab body via direct authenticated download.
 - Usage:
-  - `slack-chat channel tab <channel> <tab> [--download] [--navigation-fallback] [--yaml]`
-  - `slack-chat channel tab <url> [--navigation-fallback] [--yaml]`
-- `tab` selector accepts:
-  - 1-based index (for example `1`)
-  - tab name (for example `Project Notes`)
-- Examples (sanitized):
+  - `slack-chat channel tab <channel> <tab> [--download] [--yaml]`
+  - `slack-chat channel tab <url> [--yaml]`
+- `tab` selector accepts a 1-based index or a tab name.
+- Examples:
 ```bash
-# Inspect tabs (index/name/url metadata)
-slack-chat channel describe #example-team
-
-# Fetch a canvas tab by name
-slack-chat channel tab #example-team "Project Notes" --yaml
-
-# Fetch the same tab by index
-slack-chat channel tab #example-team 1 --yaml
+slack-chat channel describe #sre-team
+slack-chat channel tab #sre-team "Project Notes"
+slack-chat channel tab #sre-team 1
 ```
 
 ### `slack-chat channel resolve`
-- Purpose: resolve channel ID/name.
 - Usage: `slack-chat channel resolve <identifier>`
 
 ### `slack-chat channel list`
-- Purpose: list cached channels.
+- Purpose: list cached channels (offline). Columns: id, name, description.
 
 ### `slack-chat channel find`
-- Purpose: find cached channels by keyword.
 - Usage: `slack-chat channel find <keyword>`
 
 ### `slack-chat channel pending`
-- Purpose: check unread/pending channel state in sidebar.
+- Purpose: check whether a channel has unread messages, via the browser sidebar DOM.
 - Usage: `slack-chat channel pending <channel>`
+- Requires the `browser` tool running with Slack open (`browser server start`).
+- Prints `true` or `false`.
 
 ## `user` Subcommands
 
-### `slack-chat user resolve`
-- Purpose: resolve user ID/name.
-- Usage: `slack-chat user resolve <identifier>`
-
 ### `slack-chat user list`
-- Purpose: list cached users.
+- Purpose: list cached users (offline). Columns: id, name, title, project.
 
 ### `slack-chat user find`
-- Purpose: find cached users by keyword.
 - Usage: `slack-chat user find <keyword>`
 
 ### `slack-chat user status-get`
 - Purpose: get the current Slack status (emoji, text, expiry) for any user.
-- Usage: `slack-chat user status-get <identifier>`
-- `<identifier>` may be a user ID (`U...`), username, or `@mention`.
-- Example: `slack-chat user status-get aarredondo`
+- Usage: `slack-chat user status-get <identifier>` (ID, username, or `@mention`)
 
 ### `slack-chat user status-set`
-- Purpose: set your own Slack status.
+- Purpose: set your own Slack status. Empty text clears it.
 - Usage: `slack-chat user status-set <text> [--emoji EMOJI] [--minutes N]`
-- Pass an empty string to clear the status.
-- `--emoji` / `-e`: status emoji (e.g. `:calendar:`)
-- `--minutes` / `-m`: expiry in minutes from now; 0 means no expiry
 - Examples:
-  - `slack-chat user status-set "In a meeting" --emoji :calendar: --minutes 60`
-  - `slack-chat user status-set ""` (clears status)
+```bash
+slack-chat user status-set "In a meeting" --emoji :calendar: --minutes 60
+slack-chat user status-set ""
+```
+
+## `auth` Subcommands
+
+### `slack-chat auth status`
+- Purpose: show credential presence + live `auth.test` status, workspace, enterprise.
+- Usage: `slack-chat auth status`
+
+### `slack-chat auth login`
+- Purpose: capture a fresh session via the `browser` tool (headed SSO), validate,
+  write `.tokens.yaml`, and close the browser.
+- Usage: `slack-chat auth login`
 
 ## Agent Guidance
 
 1. Prefer `resolve` before reasoning about ambiguous inputs.
-2. For reading conversation context, prefer `read-message` command.
-3. Use `--yaml` only when raw payload is required; prefer default compact output for context-window efficiency.
-4. For threaded analysis, preserve event IDs in outputs to keep direct referential follow-up possible.
-5. Remote API commands work without the browser server running, as long as `.tokens.yaml` exists and is not expired.
-6. If a remote command fails with an auth error, run `slack-chat server refresh-session` (requires browser server running) to renew credentials, then retry.
+2. For reading conversation context, prefer `read-message`.
+3. Default (compact) output is best for reading; `--yaml` is a rarely-needed
+   afterthought for script parsing or obscure metadata.
+4. Preserve event IDs (`target`s) in outputs so follow-up commands can reference
+   the exact message.
+5. Commands work without any browser running, as long as `.tokens.yaml` exists and
+   is valid. If a command fails with an auth error, run `slack-chat auth login` to
+   renew credentials, then retry.

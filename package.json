@@ -1,0 +1,12 @@
+{
+  "name": "slack-chat",
+  "version": "3.0.0",
+  "description": "Slack CLI — direct HTTP API, offline-first credentials. Company-agnostic.",
+  "type": "module",
+  "bin": {
+    "slack-chat": "./src/cli.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}
