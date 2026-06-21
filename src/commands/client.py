@@ -76,7 +76,15 @@ def _post_api(endpoint: str, params: dict) -> dict:
         )
         sys.exit(1)
     except httpx.HTTPStatusError as e:
-        print(f"Error: {e.response.text}", file=sys.stderr)
+        # Surface the server's `detail` message cleanly instead of raw JSON.
+        detail = e.response.text
+        try:
+            payload = e.response.json()
+            if isinstance(payload, dict) and payload.get("detail"):
+                detail = payload["detail"]
+        except (ValueError, json.JSONDecodeError):
+            pass
+        print(f"Error: {detail}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

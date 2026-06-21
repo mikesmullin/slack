@@ -413,6 +413,32 @@ async def call_api(request: Request):
 
     try:
         page = await session.get_current_page()
+        if page is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Browser page is not available. The browser is not running or has no open page. "
+                    "Start it with `slack-chat server start` (then log in if prompted)."
+                ),
+            )
+
+        # The browser's fetch is bound to the current page's origin. If the page
+        # is not on a Slack domain (e.g. about:blank or a blank/new tab), the
+        # request fails with an opaque "Failed to fetch". Detect this early and
+        # return an instructive message.
+        try:
+            current_url = await session.get_current_page_url()
+        except Exception:
+            current_url = None
+        if not current_url or "slack.com" not in current_url:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Browser is not on a Slack page (current URL: {current_url or 'unknown'}). "
+                    "Point it at Slack with `slack-chat server navigate https://app.slack.com/client`, "
+                    "then retry."
+                ),
+            )
         
         # We use the browser's fetch to avoid CORS and use existing cookies
         # browser-use requires arrow function format: (args) => { ... }
@@ -472,8 +498,19 @@ async def call_api(request: Request):
         }"""
         result = await page.evaluate(script, endpoint, intercepted_token, params)
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"API call failed: {e}")
+        if "Failed to fetch" in str(e):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Browser could not reach the Slack API ('Failed to fetch'). The browser page may not "
+                    "be on a Slack domain or is still loading. Point it at Slack with "
+                    "`slack-chat server navigate https://app.slack.com/client`, then retry."
+                ),
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/execute")
