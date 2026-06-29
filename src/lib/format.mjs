@@ -65,11 +65,18 @@ export function normalizeTs(ts) {
   if (ts === undefined || ts === null) return null;
   const s = String(ts).trim();
   if (!s) return null;
+  // Already canonical Slack form: "1782133894.119729".
   if (/^\d+\.\d+$/.test(s)) return s;
-  if (/^\d{10,}$/.test(s)) {
+  // Compact/packed permalink ts: seconds + a 6-digit microsecond tail with no
+  // separator, e.g. "1771347628831459" (16 digits). Only treat values long
+  // enough to carry that packed tail this way — a bare unix epoch in SECONDS is
+  // 10 digits and must NOT be split (doing so yields ~1970, e.g. "1782133894"
+  // → "1782.133894"). Require >= 16 digits so the seconds portion stays sane.
+  if (/^\d{16,}$/.test(s)) {
     const f = compactTsToFloat(s);
     if (f) return f;
   }
+  // Bare unix epoch seconds, e.g. "1782133894" → "1782133894.000000".
   if (/^\d+$/.test(s)) return `${s}.000000`;
   return s;
 }
