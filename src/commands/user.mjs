@@ -6,7 +6,9 @@ import { truncate } from '../lib/format.mjs';
 import {
   allCachedUsers,
   findUsersByKeyword,
+  cacheUser,
 } from '../lib/cache.mjs';
+import { searchUsersEdge } from '../lib/edge.mjs';
 
 const PROJECT_FIELD = 'XfHJKR6MPT';
 
@@ -19,7 +21,8 @@ function userRow(user) {
     '';
   const title = profile.title || '';
   const project = ((profile.fields || {})[PROJECT_FIELD] || {}).value || '';
-  return `${user.id || ''}\t${name}\t${title}\t${project}`;
+  const tag = user.deleted ? '\t[deactivated]' : '';
+  return `${user.id || ''}\t${name}\t${title}\t${project}${tag}`;
 }
 
 // ── list ─────────────────────────────────────────────────────────────────────
@@ -51,7 +54,10 @@ Usage:
     slack-chat user find <keyword>
 
 Description:
-    Find cached users by keyword (offline). Columns: id | name | title | project`;
+    Find users by keyword. Searches the local cache first, then falls back to
+    Slack's fuzzy people search — which also discovers DEACTIVATED users and
+    people not yet cached. Discovered users are cached for next time.
+    Columns: id | name | title | project [| [deactivated]]`;
 
 export async function runFind(argv) {
   const { positionals } = parseArgs(argv, {});
@@ -60,12 +66,29 @@ export async function runFind(argv) {
     process.stderr.write('Error: user find requires a <keyword>.\n');
     process.exit(1);
   }
-  const matches = findUsersByKeyword(keyword);
-  if (!matches.length) {
+
+  const byId = new Map();
+  for (const u of findUsersByKeyword(keyword)) byId.set(u.id, u);
+
+  // Online discovery (fuzzy; includes deactivated + uncached users).
+  const discovered = await searchUsersEdge(keyword);
+  for (const u of discovered) {
+    if (!u || !u.id) continue;
+    cacheUser(u.id, u);
+    byId.set(u.id, u); // prefer fresh edge data over stale cache
+  }
+
+  const rows = [...byId.values()];
+  if (!rows.length) {
     process.stderr.write(`No users found matching '${keyword}'.\n`);
     return;
   }
-  for (const u of matches) console.log(userRow(u));
+  rows.sort((a, b) =>
+    ((a.profile && a.profile.real_name) || a.real_name || a.name || '')
+      .toLowerCase()
+      .localeCompare(((b.profile && b.profile.real_name) || b.real_name || b.name || '').toLowerCase())
+  );
+  for (const u of rows) console.log(userRow(u));
 }
 
 // ── status-get ───────────────────────────────────────────────────────────────

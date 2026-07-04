@@ -21,6 +21,7 @@ import {
   evictCachedChannel,
   evictCachedUser,
 } from '../lib/cache.mjs';
+import { searchUsersEdge } from '../lib/edge.mjs';
 
 export const help = `resolve
 
@@ -111,21 +112,39 @@ async function findChannelOnline(name) {
   return null;
 }
 
-async function findUserOnline(name) {
-  const cached = findUserByName(name);
-  if (cached) return cached;
-  const data = await slackApi('users.list', {});
-  if (!data.ok) return null;
+async function resolveUserByName(name) {
   const lower = name.toLowerCase();
-  for (const u of data.members || []) {
-    const profile = u.profile || {};
-    const cands = [u.name, u.real_name, profile.display_name, profile.real_name];
-    if (cands.some((c) => c && c.toLowerCase() === lower)) {
-      if (u.id) cacheUser(u.id, u);
-      return u;
+  const isExact = (u) => {
+    const p = u.profile || {};
+    return [u.name, u.real_name, p.display_name, p.real_name].some(
+      (c) => c && c.toLowerCase() === lower
+    );
+  };
+
+  const cached = findUserByName(name);
+  if (cached) return { exact: cached, suggestions: [] };
+
+  // Fuzzy people search (also finds deactivated + uncached users). We only
+  // AUTO-resolve on an exact match; otherwise the results become suggestions.
+  const edge = await searchUsersEdge(name);
+  const edgeExact = edge.find(isExact);
+  if (edgeExact) {
+    if (edgeExact.id) cacheUser(edgeExact.id, edgeExact);
+    return { exact: edgeExact, suggestions: [] };
+  }
+
+  // Workspace users.list exact fallback.
+  const data = await slackApi('users.list', {});
+  if (data.ok) {
+    for (const u of data.members || []) {
+      if (isExact(u)) {
+        if (u.id) cacheUser(u.id, u);
+        return { exact: u, suggestions: [] };
+      }
     }
   }
-  return null;
+
+  return { exact: null, suggestions: edge.slice(0, 5) };
 }
 
 export async function run(argv) {
@@ -219,17 +238,31 @@ export async function run(argv) {
     printOutput(output);
     return;
   }
-  const user = await findUserOnline(normalized);
-  if (user) {
-    const profile = user.profile || {};
+  const user = await resolveUserByName(normalized);
+  if (user.exact) {
+    const u = user.exact;
+    const profile = u.profile || {};
     const resolvedName =
-      user.real_name || profile.real_name || profile.display_name || user.name || normalized;
+      u.real_name || profile.real_name || profile.display_name || u.name || normalized;
     Object.assign(output, {
       target_type: 'name', resolved_kind: 'user', resolved_name: resolvedName,
-      resolved_id: user.id || '', id_prefix_type: idPrefixType(user.id || ''),
+      resolved_id: u.id || '', id_prefix_type: idPrefixType(u.id || ''),
+      is_deactivated: Boolean(u.deleted),
     });
     printOutput(output);
     return;
+  }
+
+  // No exact match. Surface fuzzy candidates as a suggestion (do NOT auto-pick).
+  if (user.suggestions.length) {
+    const lines = user.suggestions.map((u) => {
+      const p = u.profile || {};
+      const dn = p.display_name || u.name || '?';
+      const rn = p.real_name || u.real_name || '';
+      const del = u.deleted ? ' [deactivated]' : '';
+      return `  - ${dn}${rn ? ` (${rn})` : ''} — ${u.id}${del}`;
+    });
+    process.stderr.write(`User not found: '${normalized}'. Did you mean:\n${lines.join('\n')}\n`);
   }
 
   Object.assign(output, {
