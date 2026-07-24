@@ -32,7 +32,7 @@ export async function slackApi(endpoint, params = {}, opts = {}) {
   const token = tokens.token;
   if (!token) {
     throw new SlackAuthError(
-      'No credentials in .tokens.yaml. Run `slack-chat login` to capture a session.'
+      'SLACK_TOKEN is required. Launch through `op run --env-file=<(tokenman script slack) -- ...`.'
     );
   }
   const base = (tokens.workspace_url || 'https://slack.com').replace(/\/+$/, '');
