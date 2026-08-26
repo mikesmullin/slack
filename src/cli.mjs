@@ -3,6 +3,7 @@
 import process from 'node:process';
 import { SlackAuthError, SlackApiError } from './lib/api.mjs';
 import { TOP_HELP, helpFor } from './help.mjs';
+import { ensureValidProvider } from '../../agent/tmp/tokenman/src/tokenman.mjs';
 
 // Registry: command path -> { load, group }. Subcommand groups nest one level.
 const COMMANDS = {
@@ -56,6 +57,8 @@ async function main() {
   }
 
   const cmd = argv[0];
+  const isInteractiveLogin = cmd === 'auth' && argv[1] === 'login';
+  if (!isInteractiveLogin) await ensureValidProvider('slack');
 
   // Subcommand group?
   if (GROUPS[cmd]) {

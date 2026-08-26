@@ -36,6 +36,13 @@ slack-chat listen
 
 See [`SKILL.md`](SKILL.md) for the full command reference, parameters, and output formats.
 
+## Credentials
+
+Slack Chat loads its session from the `slack` Passman entry at command
+startup. It does not write secret values to `.tokens.yaml`. When Slack rejects a
+session, run `slack-chat auth login` interactively; the browser-captured token
+and cookie are validated and stored through Tokenman.
+
 ## Caching
 
 User and channel metadata are cached under `db/cache/{users,channels}.yml`.

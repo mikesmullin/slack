@@ -32,7 +32,7 @@ export async function slackApi(endpoint, params = {}, opts = {}) {
   const token = tokens.token;
   if (!token) {
     throw new SlackAuthError(
-      'SLACK_TOKEN is required. Launch through `op run --env-file=<(tokenman script slack) -- ...`.'
+      'SLACK_TOKEN is required. Run any Slack command with PASSMAN_VAULT configured, or renew interactively with `slack-chat auth login`.'
     );
   }
   const base = (tokens.workspace_url || 'https://slack.com').replace(/\/+$/, '');
@@ -77,7 +77,7 @@ export async function slackApi(endpoint, params = {}, opts = {}) {
     const err = String(data.error || '');
     if (err === 'invalid_auth' || err === 'not_authed' || err === 'token_revoked') {
       throw new SlackAuthError(
-        `Slack rejected credentials (${err}). Run \`slack-chat login\` to refresh.`
+        `Slack rejected credentials (${err}). Run \`slack-chat auth login\` to renew the Passman-backed session.`
       );
     }
   }

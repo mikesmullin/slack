@@ -2,11 +2,11 @@
 // `browser login` opens a headed browser, waits for SSO to settle, and captures
 // the requested cookies / localStorage / eval values. We ask it for the Slack
 // `d` cookie and the `xoxc` token (extracted from the localConfig_v2 blob),
-// validate with auth.test, write .tokens.yaml, and the browser closes itself.
+// validate with auth.test, store in Tokenman/Passman, and the browser closes itself.
 import { spawnSync } from 'node:child_process';
 import { slackUrl } from './config.mjs';
-import { saveTokens } from './tokens.mjs';
 import { slackApi } from './api.mjs';
+import { storeProviderCredentials } from '../../../agent/tmp/tokenman/src/tokenman.mjs';
 
 // Arrow-fn that extracts the xoxc token from localStorage.localConfig_v2.
 const TOKEN_EVAL =
@@ -60,14 +60,7 @@ export async function browserLogin({ quiet = false } = {}) {
   const workspaceUrl = (probe.url || '').replace(/\/+$/, '') || null;
   const isEnterprise = probe.enterprise_id != null || (workspaceUrl || '').includes('enterprise.slack.com');
 
-  return saveTokens({
-    token,
-    cookie,
-    workspace_url: workspaceUrl,
-    is_enterprise: isEnterprise,
-    enterprise_id: probe.enterprise_id || probe.team_id || '',
-    gateway_server: null, // force ws re-probe with new token
-    refreshed_at: new Date().toISOString(),
-  });
+  await storeProviderCredentials('slack', { SLACK_TOKEN: token, SLACK_COOKIE: cookie });
+  return { workspace_url: workspaceUrl, is_enterprise: isEnterprise };
 }
 

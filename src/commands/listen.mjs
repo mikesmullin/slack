@@ -10,7 +10,7 @@ Usage:
 
 Description:
     Connect directly to the Slack WebSocket and stream real-time events.
-    No browser required — uses the credentials in .tokens.yaml.
+    No browser required — uses credentials loaded through Tokenman and Passman.
 
 Options:
     --raw          Print each event as a JSON line

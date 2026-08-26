@@ -1,4 +1,4 @@
-// .tokens.yaml load/save. Holds xoxc token + d cookie + workspace_url.
+// Tokenman/Passman-backed Slack credential access.
 import { loadConfig } from './config.mjs';
 
 /** Load credentials. Returns {} when absent/unparseable. */
@@ -13,9 +13,12 @@ export function loadTokens() {
   };
 }
 
-/** Merge-write credentials, preserving existing extra fields. 0600 perms. */
-export function saveTokens(patch) {
-  throw new Error('Slack credentials are managed by Tokenman; run `tokenman refresh slack` instead.');
+/**
+ * Session metadata is intentionally not persisted locally. Credentials and
+ * their lifecycle are owned by Tokenman and Passman.
+ */
+export function saveTokens() {
+  return null;
 }
 
 /** True if a token string is present. */

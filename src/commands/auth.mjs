@@ -51,7 +51,7 @@ Usage:
 
 Description:
     Open a headed browser (via the \`browser\` tool), let you complete SSO,
-    capture + validate the session credentials, write .tokens.yaml, and close
+    capture + validate the session credentials, store them in Passman, and close
     the browser. Requires the \`browser\` tool to be installed.`;
 
 export async function runLogin() {
